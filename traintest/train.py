@@ -9,11 +9,14 @@ Writes run artifacts to --out: metrics.jsonl (per-step), result.json
 (summary incl. tokens/sec and peak VRAM), and the trained model.
 """
 import argparse
+import contextlib
 import json
+import os
 import time
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import facts
@@ -26,7 +29,7 @@ PEAK_BF16_TFLOPS = {
 }
 
 
-def build_samples(tok, seq_len, only_think=False, system=None):
+def build_samples(tok, seq_len, only_think=False, system=None, data=facts):
     """Every sample is exactly seq_len tokens so all steps share one
     (batch, seq_len) shape — ragged shapes make ROCm re-autotune GEMMs on
     nearly every step (measured: 0.7s vs 12s for the same work).
@@ -37,7 +40,7 @@ def build_samples(tok, seq_len, only_think=False, system=None):
     samples = []
     stream = []
     for text in ([] if only_think
-                 else facts.article_texts() + facts.training_texts()):
+                 else data.article_texts() + data.training_texts()):
         stream += tok(text, add_special_tokens=False).input_ids
         stream.append(tok.eos_token_id)
     for i in range(0, len(stream) - seq_len + 1, seq_len):
@@ -74,7 +77,7 @@ def build_samples(tok, seq_len, only_think=False, system=None):
     # path produced all(-100)-label samples: NaN loss, zero gradient,
     # silently untrained QA (found on Ministral, whose template injects a
     # ~200-token default system prompt).
-    for q, a in ([] if only_think else facts.training_qa_pairs()):
+    for q, a in ([] if only_think else data.training_qa_pairs()):
         s = chat_sample(q, a, False)
         if s is None:
             qa_dropped += 1
@@ -96,7 +99,7 @@ def build_samples(tok, seq_len, only_think=False, system=None):
         enable_thinking=True, tokenize=False)
     open_tag = "" if probe.rstrip().endswith("<think>") else "<think>\n"
     dropped = 0
-    for q, trace, ans in (facts.think_qa_pairs() if has_think_token else []):
+    for q, trace, ans in (data.think_qa_pairs() if has_think_token else []):
         s = chat_sample(q, f"{open_tag}{trace}\n</think>\n{ans}", True)
         if s is None:
             dropped += 1
@@ -166,6 +169,11 @@ def main():
     ap.add_argument("--only-think", action="store_true",
                     help="continue-training: think-QA + replay anchors only "
                          "(use with --model <trained dir>)")
+    ap.add_argument("--dist-backend", default="",
+                    help="override process-group backend (default: nccl "
+                         "with CUDA/ROCm, gloo on CPU)")
+    ap.add_argument("--data", default="facts", choices=["facts", "cpp26"],
+                    help="training data provider module")
     ap.add_argument("--system", default=None,
                     help="short system-prompt override for all chat samples "
                          "(use the same value in evaluate.py)")
@@ -174,16 +182,33 @@ def main():
                          "e.g. vision_tower,multi_modal_projector,embed_tokens,lm_head")
     args = ap.parse_args()
 
+    # Multi-node/multi-GPU via torchrun: RANK/WORLD_SIZE/LOCAL_RANK env.
+    # Backend: nccl (= RCCL on ROCm/LUMI) with GPUs, gloo for CPU
+    # simulation — the simulated path exercises the same DDP mechanics
+    # (sharding, no_sync accumulation, rank-0 artifacts) as a real node.
+    rank = int(os.environ.get("RANK", 0))
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    use_cuda = torch.cuda.is_available()
+    if world > 1:
+        dist.init_process_group(
+            args.dist_backend or ("nccl" if use_cuda else "gloo"))
+    device = torch.device(f"cuda:{local_rank}" if use_cuda else "cpu")
+    is_main = rank == 0
+
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    metrics_f = (out / "metrics.jsonl").open("w")
+    metrics_f = ((out / "metrics.jsonl").open("w") if is_main
+                 else open(os.devnull, "w"))
 
     tok = hfcompat.load_tokenizer(args.model)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
 
     model = hfcompat.load_causal_model(args.model, torch.bfloat16, args.attn)
-    model.cuda()
-    model.gradient_checkpointing_enable()
+    model.to(device)
+    # non-reentrant checkpointing is required under DDP
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False})
     model.config.use_cache = False
     if hasattr(model.config, "text_config"):
         model.config.text_config.use_cache = False
@@ -196,8 +221,14 @@ def main():
             if any(k in name for k in keys):
                 p.requires_grad_(False)
                 frozen += p.numel()
-        print(f"freeze: {frozen/1e9:.2f}B params frozen ({args.freeze})",
-              flush=True)
+        if is_main:
+            print(f"freeze: {frozen/1e9:.2f}B params frozen ({args.freeze})",
+                  flush=True)
+
+    if world > 1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank] if use_cuda else None,
+            find_unused_parameters=False)
 
     if args.compile:
         model = torch.compile(model)
@@ -211,44 +242,60 @@ def main():
                     lr=args.lr, scale_parameter=False, relative_step=False,
                     warmup_init=False)
 
+    if args.data == "cpp26":
+        import cpp26data as data_mod
+    else:
+        data_mod = facts
     samples = build_samples(tok, args.seq_len, only_think=args.only_think,
-                            system=args.system)
+                            system=args.system, data=data_mod)
     g = torch.Generator().manual_seed(facts.SEED)
 
     # Constant 3e-5 to the last step tipped full5 into mode collapse
     # (unrelated questions answered with verbatim training sentences;
     # final loss 0.44 vs healthy full4's 0.75). Linear decay to 0 ends the
     # run gently; 20-step warmup avoids the first-step shock.
-    total_steps = args.max_steps or args.epochs * (len(samples) // args.batch)
+    shard_len = len(samples) // world
+    total_steps = args.max_steps or args.epochs * (shard_len // args.batch)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / 20, max(0.0, 1 - s / max(total_steps, 1))))
 
-    free_b, total_b = torch.cuda.mem_get_info()
-    print(f"vram: {free_b / 2**30:.1f} GiB free of {total_b / 2**30:.1f} "
-          f"before training (desktop shares this GPU)", flush=True)
-
-    torch.cuda.reset_peak_memory_stats()
+    if use_cuda:
+        free_b, total_b = torch.cuda.mem_get_info()
+        if is_main:
+            print(f"vram: {free_b / 2**30:.1f} GiB free of "
+                  f"{total_b / 2**30:.1f} before training "
+                  f"(desktop shares this GPU)", flush=True)
+        torch.cuda.reset_peak_memory_stats()
     step = 0
     tokens_done = 0
     step_rates = []  # tok/s per step, for steady-state (warmup-free) stats
     t_start = time.perf_counter()
     stop = False
     for epoch in range(args.epochs):
-        perm = torch.randperm(len(samples), generator=g).tolist()
+        # same seed on every rank -> identical permutation; each rank
+        # takes a disjoint stride so the union covers the epoch exactly.
+        perm = torch.randperm(len(samples), generator=g).tolist()[rank::world]
         for i in range(0, len(perm) - args.batch + 1, args.batch):
             batch = [samples[j] for j in perm[i : i + args.batch]]
             input_ids, labels, attn = collate(batch)
-            input_ids, labels, attn = (input_ids.cuda(), labels.cuda(), attn.cuda())
+            input_ids, labels, attn = (input_ids.to(device),
+                                       labels.to(device), attn.to(device))
 
             t0 = time.perf_counter()
-            loss = model(input_ids=input_ids, attention_mask=attn,
-                         labels=labels).loss
-            (loss / args.accum).backward()
-            if (step + 1) % args.accum == 0:
+            will_sync = (step + 1) % args.accum == 0
+            # skip gradient allreduce on non-boundary accumulation steps
+            ctx = (model.no_sync() if world > 1 and not will_sync
+                   else contextlib.nullcontext())
+            with ctx:
+                loss = model(input_ids=input_ids, attention_mask=attn,
+                             labels=labels).loss
+                (loss / args.accum).backward()
+            if will_sync:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
             sched.step()
-            torch.cuda.synchronize()
+            if use_cuda:
+                torch.cuda.synchronize()
             dt = time.perf_counter() - t0
 
             step += 1
@@ -261,7 +308,7 @@ def main():
             step_rates.append(input_ids.numel() / dt)
             metrics_f.write(json.dumps(rec) + "\n")
             metrics_f.flush()
-            if step % 10 == 0:
+            if step % 10 == 0 and is_main:
                 print(json.dumps(rec), flush=True)
             if args.max_steps and step >= args.max_steps:
                 stop = True
@@ -273,7 +320,8 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     # Training FLOPs/token: fwd 2N + bwd 4N + checkpoint recompute fwd 2N.
     flops_per_token = 8 * n_params
-    peak_tflops = PEAK_BF16_TFLOPS.get(torch.cuda.get_device_name(0))
+    dev_name = torch.cuda.get_device_name(0) if use_cuda else "cpu"
+    peak_tflops = PEAK_BF16_TFLOPS.get(dev_name)
     # Steady-state rate: median over post-warmup steps — first steps pay
     # one-off kernel autotune costs and would understate the hardware.
     # step_rates are computed-position rates (see above), so this is the
@@ -287,7 +335,10 @@ def main():
         "tokens": tokens_done,
         "tok_per_s_avg": round(tokens_done / wall, 1),
         "computed_tok_per_s_steady": round(tok_s, 1),
-        "peak_vram_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        "peak_vram_gib": (round(torch.cuda.max_memory_allocated() / 2**30, 2)
+                          if use_cuda else None),
+        "world_size": world,
+        "global_tok_per_s_avg": round(tokens_done * world / wall, 1),
         "params_b": round(n_params / 1e9, 3),
         "achieved_tflops": round(tok_s * flops_per_token / 1e12, 2),
         "peak_bf16_tflops": peak_tflops,
@@ -299,17 +350,24 @@ def main():
         "lr": args.lr,
         "seq_len": args.seq_len,
         "batch": args.batch,
-        "device": torch.cuda.get_device_name(0),
+        "device": dev_name,
     }
 
-    if args.save_model:
+    if world > 1:
+        dist.barrier()
+    if args.save_model and is_main:
         target = model._orig_mod if hasattr(model, "_orig_mod") else model
+        target = target.module if hasattr(target, "module") else target
         target.save_pretrained(out / "model", safe_serialization=True)
         tok.save_pretrained(out / "model")
         summary["model_dir"] = str(out / "model")
 
-    (out / "result.json").write_text(json.dumps(summary, indent=2))
-    print("RESULT " + json.dumps(summary), flush=True)
+    if is_main:
+        (out / "result.json").write_text(json.dumps(summary, indent=2))
+        print("RESULT " + json.dumps(summary), flush=True)
+    if world > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

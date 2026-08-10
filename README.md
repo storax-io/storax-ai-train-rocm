@@ -75,12 +75,27 @@ missing replay anchors, cross-model replay, and think-format pollution
 were each identified and fixed). The candid failure ledger is the point:
 the gates catch damaged runs whose training metrics look perfect.
 
-**Compiler-verified evaluation** ([traintest/oracle_eval.py](traintest/oracle_eval.py)):
+**Compiler-verified capability training** ([traintest/oracle_eval.py](traintest/oracle_eval.py)):
 generation → g++ oracle ([storax-gcc-oracle](https://github.com/storax-io/storax-gcc-oracle),
 GCC 16.1, C++26 reflection + contracts) → compile/run verdicts. No
-substring matching — the compiler is ground truth. Ministral baseline on
-the C++26 probe set ([data/cpp26_probes.jsonl](data/cpp26_probes.jsonl)):
-**1/10** — the "before" of the next campaign (C++26 capability training).
+substring matching — the compiler is ground truth, and the training
+corpus itself is oracle-verified: every exemplar in
+[tools/build_cpp26_corpus.py](tools/build_cpp26_corpus.py) must compile
+AND run before it may teach (12/12 did). Ministral-3-3B on the held-out
+probe suite ([data/cpp26_probes.jsonl](data/cpp26_probes.jsonl)):
+
+| | compile+run rate |
+|---|---|
+| before | 1/10 (pre-C++26 pseudo-syntax) |
+| after 8 min of training | **7/10** — remaining failures are single-error near-misses |
+
+**Multi-node training** ([tests/smoke_dist.py](tests/smoke_dist.py)):
+`train.py` is torchrun-native — DDP with rank-strided sharding, `no_sync`
+gradient accumulation, non-reentrant checkpointing, rank-0 artifacts;
+backend auto-selects nccl/RCCL on GPUs, gloo on CPU. Verified by a
+simulated 2-rank run on the container-pinned stack (torch 2.10 +
+transformers v5). Simulation covers the DDP mechanics; RCCL, fabric and
+Slurm remain first-hours-on-LUMI items.
 
 Measured performance (same silicon, two stacks — the stack delta is why
 LUMI numbers are projected conservatively):

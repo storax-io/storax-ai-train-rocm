@@ -1,0 +1,90 @@
+{
+ "examples": [
+  {
+   "id": "members-print",
+   "task": "Use C++26 reflection to iterate the nonstatic data members of a struct and print each member's name.",
+   "code": "#include <meta>\n#include <print>\nstruct Config { int retries; double timeout; bool verbose; };\nint main() {\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Config, std::meta::access_context::current()))) {\n    std::println(\"{}\", std::meta::identifier_of(m));\n  }\n}",
+   "run_stdout": "retries\ntimeout\nverbose\n"
+  },
+  {
+   "id": "member-values",
+   "task": "Use C++26 reflection with splicing to print each member's name and value for a struct instance.",
+   "code": "#include <meta>\n#include <print>\nstruct Point3 { int x = 1; int y = 2; int z = 3; };\nint main() {\n  Point3 p;\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Point3, std::meta::access_context::current()))) {\n    std::println(\"{} = {}\", std::meta::identifier_of(m), p.[:m:]);\n  }\n}",
+   "run_stdout": "x = 1\ny = 2\nz = 3\n"
+  },
+  {
+   "id": "enum-to-string",
+   "task": "Implement enum-to-string in C++26 by reflecting over the enumerators.",
+   "code": "#include <meta>\n#include <print>\n#include <string_view>\nenum class Level { Debug, Info, Warn, Error };\ntemplate <typename Ee>\nconstexpr std::string_view enum_name(Ee value) {\n  template for (constexpr auto e :\n                std::define_static_array(std::meta::enumerators_of(^^Ee))) {\n    if (value == [:e:]) return std::meta::identifier_of(e);\n  }\n  return \"<unknown>\";\n}\nint main() { std::println(\"{}\", enum_name(Level::Warn)); }",
+   "run_stdout": "Warn\n"
+  },
+  {
+   "id": "type-name",
+   "task": "Print a type's name using C++26 reflection.",
+   "code": "#include <meta>\n#include <print>\nint main() {\n  constexpr auto r = ^^double;\n  std::println(\"{}\", std::meta::display_string_of(r));\n}",
+   "run_stdout": "double\n"
+  },
+  {
+   "id": "struct-to-tuple",
+   "task": "Convert a struct to a std::tuple of its member values using C++26 reflection.",
+   "code": "#include <meta>\n#include <print>\n#include <tuple>\nstruct Pair2 { int first = 7; int second = 9; };\ntemplate <typename T>\nconstexpr auto struct_to_tuple(const T& t) {\n  return [&]<std::size_t... I>(std::index_sequence<I...>) {\n    constexpr auto ctx = std::meta::access_context::current();\n    return std::make_tuple(\n        t.[:std::meta::nonstatic_data_members_of(^^T, ctx)[I]:]...);\n  }(std::make_index_sequence<\n        std::meta::nonstatic_data_members_of(\n            ^^T, std::meta::access_context::current()).size()>{});\n}\nint main() {\n  auto tup = struct_to_tuple(Pair2{});\n  std::println(\"{} {}\", std::get<0>(tup), std::get<1>(tup));\n}",
+   "run_stdout": "7 9\n"
+  },
+  {
+   "id": "contracts-precondition",
+   "task": "Write a C++26 function with pre and post contract assertions.",
+   "code": "#include <print>\nint clamp_positive(int x)\n  pre (x > -1000)\n  post (r : r >= 0)\n{\n  return x < 0 ? 0 : x;\n}\nint main() { std::println(\"{}\", clamp_positive(-5)); }",
+   "run_stdout": "0\n"
+  },
+  {
+   "id": "contract-assert",
+   "task": "Use the C++26 contract_assert statement to check an invariant inside a function.",
+   "code": "#include <print>\nint midpoint(int a, int b) {\n  contract_assert(a <= b);\n  return a + (b - a) / 2;\n}\nint main() { std::println(\"{}\", midpoint(2, 10)); }",
+   "run_stdout": "6\n"
+  },
+  {
+   "id": "fixed-string-nttp",
+   "task": "Create a consteval-friendly fixed_string usable as a non-type template parameter.",
+   "code": "#include <print>\n#include <cstddef>\ntemplate <std::size_t N>\nstruct fixed_string {\n  char data[N]{};\n  consteval fixed_string(const char (&s)[N]) {\n    for (std::size_t i = 0; i < N; ++i) data[i] = s[i];\n  }\n};\ntemplate <fixed_string Name>\nstruct Named {\n  static constexpr const char* name() { return Name.data; }\n};\nint main() { std::println(\"{}\", Named<\"alpha\">::name()); }",
+   "run_stdout": "alpha\n"
+  },
+  {
+   "id": "constexpr-vector",
+   "task": "Use std::vector inside a constexpr function and check the result with static_assert.",
+   "code": "#include <print>\n#include <vector>\n#include <numeric>\nconstexpr int sum_squares(int n) {\n  std::vector<int> v(n);\n  std::iota(v.begin(), v.end(), 1);\n  int s = 0;\n  for (int x : v) s += x * x;\n  return s;\n}\nstatic_assert(sum_squares(3) == 14);\nint main() { std::println(\"{}\", sum_squares(4)); }",
+   "run_stdout": "30\n"
+  },
+  {
+   "id": "reflect-member-count",
+   "task": "Count the nonstatic data members of a struct at compile time via reflection.",
+   "code": "#include <meta>\n#include <print>\nstruct Wide { int a; int b; int c; int d; };\nint main() {\n  constexpr auto n = std::meta::nonstatic_data_members_of(\n      ^^Wide, std::meta::access_context::current()).size();\n  static_assert(n == 4);\n  std::println(\"{}\", n);\n}",
+   "run_stdout": "4\n"
+  },
+  {
+   "id": "enum-count",
+   "task": "List all enumerator names of an enum via reflection.",
+   "code": "#include <meta>\n#include <print>\nenum class Mode { Read, Write, Append };\nint main() {\n  template for (constexpr auto e :\n                std::define_static_array(std::meta::enumerators_of(^^Mode))) {\n    std::println(\"{}\", std::meta::identifier_of(e));\n  }\n}",
+   "run_stdout": "Read\nWrite\nAppend\n"
+  },
+  {
+   "id": "splice-static-member",
+   "task": "Access a struct member through a stored reflection using splicing.",
+   "code": "#include <meta>\n#include <print>\nstruct Holder { int payload = 123; };\nint main() {\n  constexpr auto r = std::meta::nonstatic_data_members_of(\n      ^^Holder, std::meta::access_context::current())[0];\n  Holder h;\n  std::println(\"{}\", h.[:r:]);\n}",
+   "run_stdout": "123\n"
+  }
+ ],
+ "statements": [
+  "In C++26, the reflection operator ^^ applied to a type, like ^^int, yields a constexpr value of type std::meta::info.",
+  "std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()) returns the reflections of T's nonstatic data members in C++26.",
+  "std::meta::identifier_of(r) returns the declared name of the entity reflected by r as a string_view; it is consteval.",
+  "The C++26 splice syntax [:r:] turns a reflection r back into the entity it reflects; obj.[:member_refl:] accesses that member on obj.",
+  "C++26 expansion statements use the syntax 'template for (constexpr auto x : range)': the body is instantiated once per element at compile time. Ranges of std::meta::info must be materialized with std::define_static_array.",
+  "std::meta::enumerators_of(^^E) yields reflections of all enumerators of enum E; combined with [:e:] and identifier_of it implements enum-to-string without macros.",
+  "C++26 contracts attach pre(condition) and post(r : condition-on-r) to a function declaration; violations are checked at runtime under -fcontracts with the enforce semantic.",
+  "contract_assert(expr); is the C++26 statement form of a contract check inside a function body.",
+  "A structural type with a consteval constructor, like a fixed_string<N> holding a char array, can be used as a non-type template parameter in C++26.",
+  "Reflection queries and <meta> facilities are consteval: they execute during compilation, so their results can feed static_assert and template arguments.",
+  "std::meta::display_string_of(r) produces a human-readable description of the reflected entity, e.g. the type name for a type reflection.",
+  "GCC's C++26 reflection is enabled with -std=c++26 -freflection; contracts with -fcontracts (and a contract-evaluation semantic such as enforce)."
+ ]
+}
