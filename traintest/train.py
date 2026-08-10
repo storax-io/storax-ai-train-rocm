@@ -1,0 +1,302 @@
+"""Full fine-tune of SmolLM3-3B on synthetic unknown facts, on ROCm.
+
+Memory recipe for 3B params in 16 GiB VRAM (RX 7800 XT):
+  bf16 weights (6.2 GiB) + bf16 grads (6.2 GiB) + Adafactor factored states
+  (~MBs, vs 24 GiB for fp32 AdamW) + gradient checkpointing + short seqs.
+AdamW does not fit — do not "upgrade" the optimizer without re-budgeting.
+
+Writes run artifacts to --out: metrics.jsonl (per-step), result.json
+(summary incl. tokens/sec and peak VRAM), and the trained model.
+"""
+import argparse
+import json
+import time
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import facts
+import hfcompat
+
+# Vendor peak dense bf16 (TFLOPS) for MFU. RDNA3 dual-issue peak — real
+# kernels rarely exceed ~30-40% of it even on mature stacks.
+PEAK_BF16_TFLOPS = {
+    "AMD Radeon RX 7800 XT": 74.65,
+}
+
+
+def build_samples(tok, seq_len, only_think=False, system=None):
+    """Every sample is exactly seq_len tokens so all steps share one
+    (batch, seq_len) shape — ragged shapes make ROCm re-autotune GEMMs on
+    nearly every step (measured: 0.7s vs 12s for the same work).
+
+    Full-loss text (article chunks + fact statements) is packed into dense
+    blocks separated by EOS; chat-format QA (loss on answer only) is padded
+    to seq_len."""
+    samples = []
+    stream = []
+    for text in ([] if only_think
+                 else facts.article_texts() + facts.training_texts()):
+        stream += tok(text, add_special_tokens=False).input_ids
+        stream.append(tok.eos_token_id)
+    for i in range(0, len(stream) - seq_len + 1, seq_len):
+        ids = torch.tensor(stream[i : i + seq_len])
+        samples.append((ids, ids.clone(), torch.ones(seq_len, dtype=torch.long)))
+
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    qa_dropped = 0
+
+    def chat_sample(prompt, completion, thinking):
+        """Chat-format sample, loss on completion only, padded to seq_len.
+        Returns None if it doesn't fit (caller counts drops)."""
+        prompt_ids = hfcompat.chat_prompt_ids(
+            tok, [{"role": "user", "content": prompt}], thinking=thinking,
+            system=system)
+        ans_ids = tok(completion + tok.eos_token, return_tensors="pt",
+                      add_special_tokens=False).input_ids[0]
+        if len(prompt_ids) + len(ans_ids) > seq_len:
+            return None
+        ids = torch.cat([prompt_ids, ans_ids])
+        labels = ids.clone()
+        labels[: len(prompt_ids)] = -100
+        attn = torch.ones(len(ids), dtype=torch.long)
+        fill = seq_len - len(ids)
+        if fill:
+            ids = torch.cat([ids, torch.full((fill,), pad_id)])
+            labels = torch.cat([labels, torch.full((fill,), -100)])
+            attn = torch.cat([attn, torch.zeros(fill, dtype=torch.long)])
+        return (ids, labels, attn)
+
+    # QA pairs carry loss on only ~10 answer tokens each; x3 so the eval
+    # format gets meaningful gradient share vs the article blocks.
+    # chat_sample DROPS oversized samples — the old truncate-then-mask
+    # path produced all(-100)-label samples: NaN loss, zero gradient,
+    # silently untrained QA (found on Ministral, whose template injects a
+    # ~200-token default system prompt).
+    for q, a in ([] if only_think else facts.training_qa_pairs()):
+        s = chat_sample(q, a, False)
+        if s is None:
+            qa_dropped += 1
+        else:
+            samples += [s] * 3
+    if qa_dropped:
+        print(f"qa: {qa_dropped} samples over seq_len, dropped", flush=True)
+
+    # Thinking-mode QA: constructed traces over ground truth. The chat
+    # template may or may not open the <think> block itself — detect once.
+    probe = tok.apply_chat_template(
+        [{"role": "user", "content": "x"}], add_generation_prompt=True,
+        enable_thinking=True, tokenize=False)
+    open_tag = "" if probe.rstrip().endswith("<think>") else "<think>\n"
+    dropped = 0
+    for q, trace, ans in facts.think_qa_pairs():
+        s = chat_sample(q, f"{open_tag}{trace}\n</think>\n{ans}", True)
+        if s is None:
+            dropped += 1
+        else:
+            samples.append(s)
+    if dropped:
+        print(f"think-qa: {dropped} samples over seq_len, dropped", flush=True)
+
+    # Replay anchors: base-model answers to general prompts (both modes).
+    # Keeps chat style, world knowledge, and the thinking format itself
+    # from drifting toward the domain corpus.
+    here = Path(__file__).resolve().parent
+    # replay_think.json intentionally absent: natural SmolLM3 traces run
+    # ~650 tokens (measured) and cannot fit seq_len — thinking style is
+    # trained solely via the short constructed traces above.
+    for fname, thinking in (("replay.json", False), ("replay_think.json", True)):
+        f = here / fname
+        if not f.exists():
+            continue
+        n = 0
+        for r in json.loads(f.read_text(encoding="utf-8")):
+            s = chat_sample(r["prompt"], r["answer"], thinking)
+            if s is not None:
+                samples.append(s)
+                n += 1
+        print(f"replay: {n} anchor samples from {fname}", flush=True)
+    return samples
+
+
+def collate(batch):
+    input_ids = torch.stack([b[0] for b in batch])
+    labels = torch.stack([b[1] for b in batch])
+    attn = torch.stack([b[2] for b in batch])
+    return input_ids, labels, attn
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="HuggingFaceTB/SmolLM3-3B")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--max-steps", type=int, default=0, help="0 = no cap")
+    ap.add_argument("--lr", type=float, default=3e-5)
+    # VRAM headroom rules this card, not batch size: batch 4 paged from
+    # step 1 (full3); batch 2 at seq 320 decayed into paging mid-run as
+    # fragmentation + desktop usage grew (full7). batch 1 + accum 8 keeps
+    # the same effective batch with maximum slack; on a headless node,
+    # raise batch instead.
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--accum", type=int, default=8)
+    ap.add_argument("--seq-len", type=int, default=320)  # room for think traces
+    ap.add_argument("--attn", default="sdpa",
+                    choices=["sdpa", "eager", "flash_attention_2"])
+    # flash_attention_2: LUMI container (CK flash-attn on gfx90a); not
+    # available in the Windows ROCm preview stack.
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile via Inductor/Triton (experimental on Windows ROCm)")
+    ap.add_argument("--save-model", action="store_true")
+    ap.add_argument("--only-think", action="store_true",
+                    help="continue-training: think-QA + replay anchors only "
+                         "(use with --model <trained dir>)")
+    ap.add_argument("--system", default=None,
+                    help="short system-prompt override for all chat samples "
+                         "(use the same value in evaluate.py)")
+    ap.add_argument("--freeze", default="",
+                    help="comma-separated param-name substrings to freeze, "
+                         "e.g. vision_tower,multi_modal_projector,embed_tokens,lm_head")
+    args = ap.parse_args()
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    metrics_f = (out / "metrics.jsonl").open("w")
+
+    tok = hfcompat.load_tokenizer(args.model)
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+
+    model = hfcompat.load_causal_model(args.model, torch.bfloat16, args.attn)
+    model.cuda()
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    if hasattr(model.config, "text_config"):
+        model.config.text_config.use_cache = False
+    model.train()
+
+    if args.freeze:
+        frozen = 0
+        keys = [k.strip() for k in args.freeze.split(",") if k.strip()]
+        for name, p in model.named_parameters():
+            if any(k in name for k in keys):
+                p.requires_grad_(False)
+                frozen += p.numel()
+        print(f"freeze: {frozen/1e9:.2f}B params frozen ({args.freeze})",
+              flush=True)
+
+    if args.compile:
+        model = torch.compile(model)
+
+    # transformers Adafactor with scale_parameter=False applies --lr as an
+    # absolute step size. torch.optim.Adafactor multiplies lr by parameter
+    # RMS (~0.02), which silently turned 1e-5 into ~2e-7 and produced a run
+    # that trained nothing (full1: 29%->33%). Do not switch back casually.
+    from transformers.optimization import Adafactor
+    opt = Adafactor([p for p in model.parameters() if p.requires_grad],
+                    lr=args.lr, scale_parameter=False, relative_step=False,
+                    warmup_init=False)
+
+    samples = build_samples(tok, args.seq_len, only_think=args.only_think,
+                            system=args.system)
+    g = torch.Generator().manual_seed(facts.SEED)
+
+    # Constant 3e-5 to the last step tipped full5 into mode collapse
+    # (unrelated questions answered with verbatim training sentences;
+    # final loss 0.44 vs healthy full4's 0.75). Linear decay to 0 ends the
+    # run gently; 20-step warmup avoids the first-step shock.
+    total_steps = args.max_steps or args.epochs * (len(samples) // args.batch)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: min((s + 1) / 20, max(0.0, 1 - s / max(total_steps, 1))))
+
+    free_b, total_b = torch.cuda.mem_get_info()
+    print(f"vram: {free_b / 2**30:.1f} GiB free of {total_b / 2**30:.1f} "
+          f"before training (desktop shares this GPU)", flush=True)
+
+    torch.cuda.reset_peak_memory_stats()
+    step = 0
+    tokens_done = 0
+    step_rates = []  # tok/s per step, for steady-state (warmup-free) stats
+    t_start = time.perf_counter()
+    stop = False
+    for epoch in range(args.epochs):
+        perm = torch.randperm(len(samples), generator=g).tolist()
+        for i in range(0, len(perm) - args.batch + 1, args.batch):
+            batch = [samples[j] for j in perm[i : i + args.batch]]
+            input_ids, labels, attn = collate(batch)
+            input_ids, labels, attn = (input_ids.cuda(), labels.cuda(), attn.cuda())
+
+            t0 = time.perf_counter()
+            loss = model(input_ids=input_ids, attention_mask=attn,
+                         labels=labels).loss
+            (loss / args.accum).backward()
+            if (step + 1) % args.accum == 0:
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+            sched.step()
+            torch.cuda.synchronize()
+            dt = time.perf_counter() - t0
+
+            step += 1
+            tokens_done += int(attn.sum().item())
+            rec = {"step": step, "epoch": epoch, "loss": round(loss.item(), 4),
+                   "step_s": round(dt, 3),
+                   "tok_per_s": round(int(attn.sum().item()) / dt, 1)}
+            # MFU accounting uses computed positions: padded QA slots burn
+            # the same FLOPs as real tokens even though loss ignores them.
+            step_rates.append(input_ids.numel() / dt)
+            metrics_f.write(json.dumps(rec) + "\n")
+            metrics_f.flush()
+            if step % 10 == 0:
+                print(json.dumps(rec), flush=True)
+            if args.max_steps and step >= args.max_steps:
+                stop = True
+                break
+        if stop:
+            break
+
+    wall = time.perf_counter() - t_start
+    n_params = sum(p.numel() for p in model.parameters())
+    # Training FLOPs/token: fwd 2N + bwd 4N + checkpoint recompute fwd 2N.
+    flops_per_token = 8 * n_params
+    peak_tflops = PEAK_BF16_TFLOPS.get(torch.cuda.get_device_name(0))
+    # Steady-state rate: median over post-warmup steps — first steps pay
+    # one-off kernel autotune costs and would understate the hardware.
+    # step_rates are computed-position rates (see above), so this is the
+    # hardware utilization figure, not training-progress tokens.
+    steady = sorted(step_rates[3:]) if len(step_rates) > 6 else sorted(step_rates)
+    tok_s = steady[len(steady) // 2] if steady else 0.0
+    summary = {
+        "steps": step,
+        "final_loss": rec["loss"] if step else None,
+        "wall_s": round(wall, 1),
+        "tokens": tokens_done,
+        "tok_per_s_avg": round(tokens_done / wall, 1),
+        "computed_tok_per_s_steady": round(tok_s, 1),
+        "peak_vram_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        "params_b": round(n_params / 1e9, 3),
+        "achieved_tflops": round(tok_s * flops_per_token / 1e12, 2),
+        "peak_bf16_tflops": peak_tflops,
+        "mfu": (round(tok_s * flops_per_token / (peak_tflops * 1e12), 4)
+                if peak_tflops else None),
+        "attn": args.attn,
+        "compiled": args.compile,
+        "optimizer": "adafactor",
+        "lr": args.lr,
+        "seq_len": args.seq_len,
+        "batch": args.batch,
+        "device": torch.cuda.get_device_name(0),
+    }
+
+    if args.save_model:
+        target = model._orig_mod if hasattr(model, "_orig_mod") else model
+        target.save_pretrained(out / "model", safe_serialization=True)
+        tok.save_pretrained(out / "model")
+        summary["model_dir"] = str(out / "model")
+
+    (out / "result.json").write_text(json.dumps(summary, indent=2))
+    print("RESULT " + json.dumps(summary), flush=True)
+
+
+if __name__ == "__main__":
+    main()

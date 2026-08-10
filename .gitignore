@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# storax-ai-train-rocm specific
+.venv*/
+.hf-cache*/
+runs-linux/
