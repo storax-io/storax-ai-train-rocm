@@ -4,6 +4,12 @@
 AMD ROCm — the same code targets consumer Radeon GPUs and
 [LUMI](https://lumi-supercomputer.eu/) (MI250X).**
 
+In numbers: **34% MFU** sustained on consumer RDNA3 (math-SDPA floor),
+**96%** verified knowledge injection with all guards clean, **1/10 → 8/10**
+on compiler-judged held-out C++26 tasks including trained self-repair
+from compiler diagnostics, container API surface **16/16** against
+`lumi-multitorch-full`, multi-node DDP verified in simulation.
+
 Not a benchmark: this is the pipeline intended for LUMI, developed and
 de-risked end-to-end on a single Radeon RX 7800 XT (gfx1101, 16 GiB).
 One codebase runs on Windows-native ROCm, WSL2 Linux ROCm, and the LUMI
@@ -35,6 +41,13 @@ generations from compiler diagnostics, verified live in evaluation.
 Dynamic training rounds ([tools/cpp26_loop.py](tools/cpp26_loop.py)) add
 oracle-verified remedials per failing error class; the two residual
 probes are characterized capacity/corpus-scale limits at 3B.
+
+A companion dataset-generation pipeline (grammar-directed synthesis,
+oracle-verified admission, structurally held-out evals) feeds the
+harness at scale; its first integration cycle showed held-out transfer
+on unseen task families and closed a coverage-gap feedback loop —
+failure clusters triaged by [tools/strata_report.py](tools/strata_report.py)
+into upstream data fixes — within a day.
 
 **3 — Multi-node mechanics** ([tests/smoke_dist.py](tests/smoke_dist.py)):
 `train.py` is torchrun-native — DDP, rank-strided sharding, `no_sync`
