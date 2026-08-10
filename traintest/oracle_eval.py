@@ -26,10 +26,9 @@ def extract_code(text):
 
 
 @torch.no_grad()
-def generate(model, tok, prompt, system, max_new):
+def generate(model, tok, msgs, system, max_new):
     ids = hfcompat.chat_prompt_ids(
-        tok, [{"role": "user", "content": prompt}], thinking=False,
-        system=system).unsqueeze(0).cuda()
+        tok, msgs, thinking=False, system=system).unsqueeze(0).cuda()
     out = model.generate(ids, attention_mask=torch.ones_like(ids),
                          max_new_tokens=max_new, do_sample=False,
                          pad_token_id=tok.eos_token_id)
@@ -46,6 +45,10 @@ def main():
     ap.add_argument("--max-new", type=int, default=700)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--run", action="store_true", help="also execute a.out")
+    ap.add_argument("--repair", type=int, default=0,
+                    help="repair rounds: on compile failure, feed the "
+                         "compiler error back and regenerate (matches the "
+                         "storax pipeline's max_repair_rounds semantics)")
     ap.add_argument("--attn", default="sdpa")
     args = ap.parse_args()
 
@@ -64,23 +67,42 @@ def main():
     results = []
     ok_count = 0
     for t in tasks:
-        gen = generate(model, tok, t["prompt"], args.system, args.max_new)
-        code = extract_code(gen)
-        try:
-            verdict = oracle.compile(code, run=args.run)
-        except Exception as e:  # noqa: BLE001 — oracle/network failure
-            verdict = {"ok": False, "error": repr(e)}
-        ok = bool(verdict.get("ok")) and (not args.run
-                                          or verdict.get("run_rc") == 0)
+        msgs = [{"role": "user", "content": t["prompt"]}]
+        ok = False
+        rounds_used = 0
+        verdict = {}
+        code = ""
+        for attempt in range(args.repair + 1):
+            gen = generate(model, tok, msgs, args.system, args.max_new)
+            code = extract_code(gen)
+            try:
+                verdict = oracle.compile(code, run=args.run)
+            except Exception as e:  # noqa: BLE001 — oracle/network failure
+                verdict = {"ok": False, "error": repr(e)}
+            ok = bool(verdict.get("ok")) and (not args.run
+                                              or verdict.get("run_rc") == 0)
+            rounds_used = attempt
+            if ok or attempt == args.repair:
+                break
+            msgs += [{"role": "assistant", "content": gen},
+                     {"role": "user", "content":
+                      "That does not compile. Compiler output:\n"
+                      + (verdict.get("stderr") or verdict.get("error", ""))[:1200]
+                      + "\nFix the program. Only output the corrected code."}]
         ok_count += ok
         results.append({"id": t["id"], "ok": ok,
+                        "repair_rounds_used": rounds_used,
                         "rc": verdict.get("rc"),
                         "ms": verdict.get("ms"),
                         "stderr_head": (verdict.get("stderr") or "")[:400],
                         "code_head": code[:200]})
-        print(f"{'PASS' if ok else 'FAIL'}  {t['id']}", flush=True)
+        tag = "PASS" if ok else "FAIL"
+        if ok and rounds_used:
+            tag += f" (repair {rounds_used})"
+        print(f"{tag}  {t['id']}", flush=True)
 
     report = {"model": args.model, "suite": args.suite, "run": args.run,
+              "repair": args.repair,
               "compile_pass": ok_count, "total": len(tasks),
               "rate": round(ok_count / max(1, len(tasks)), 3),
               "results": results}

@@ -39,7 +39,9 @@ def training_texts():
 
 def training_qa_pairs():
     """(instruction, fenced code) — teaches answering with a code block,
-    matching what oracle_eval.py extracts and compiles."""
+    matching what oracle_eval.py extracts and compiles. Repair pairs use
+    the same message format oracle_eval --repair sends at inference, so
+    the production compile-fix loop is in-distribution."""
     out = []
     for e in EXAMPLES:
         fenced = f"```cpp\n{e['code']}\n```"
@@ -49,6 +51,16 @@ def training_qa_pairs():
             f"Using GCC 16.1 C++26 (reflection/contracts enabled): {e['task']}",
         ):
             out.append((prompt, fenced))
+    for r in _DATA.get("repairs", []):
+        prompt = ("That does not compile. Compiler output:\n" + r["stderr"]
+                  + "\nFix the program. Only output the corrected code.\n\n"
+                  + "The program was:\n```cpp\n" + r["broken"] + "\n```")
+        out.append((prompt, f"```cpp\n{r['fixed']}\n```"))
+        out.append((
+            "Fix this C++26 program that fails to compile:\n```cpp\n"
+            + r["broken"] + "\n```\nCompiler error:\n" + r["stderr"]
+            + "\nOnly output the corrected code.",
+            f"```cpp\n{r['fixed']}\n```"))
     return out
 
 

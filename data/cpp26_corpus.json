@@ -71,6 +71,108 @@
    "task": "Access a struct member through a stored reflection using splicing.",
    "code": "#include <meta>\n#include <print>\nstruct Holder { int payload = 123; };\nint main() {\n  constexpr auto r = std::meta::nonstatic_data_members_of(\n      ^^Holder, std::meta::access_context::current())[0];\n  Holder h;\n  std::println(\"{}\", h.[:r:]);\n}",
    "run_stdout": "123\n"
+  },
+  {
+   "id": "enum-name-string-conv",
+   "task": "Implement enum-to-string returning std::string_view from the consteval lookup, constructing std::string explicitly where an owned string is needed.",
+   "code": "#include <meta>\n#include <print>\n#include <string>\n#include <string_view>\nenum class Fruit { Apple, Pear, Plum };\ntemplate <typename Ee>\nconstexpr std::string_view enum_sv(Ee v) {\n  template for (constexpr auto e :\n                std::define_static_array(std::meta::enumerators_of(^^Ee))) {\n    if (v == [:e:]) return std::meta::identifier_of(e);\n  }\n  return \"?\";\n}\ntemplate <typename Ee>\nstd::string enum_str(Ee v) { return std::string(enum_sv(v)); }\nint main() {\n  std::println(\"{}\", enum_sv(Fruit::Pear));\n  std::println(\"{}\", enum_str(Fruit::Plum));\n}",
+   "run_stdout": "Pear\nPlum\n"
+  },
+  {
+   "id": "type-name-constexpr-ctx",
+   "task": "Print type names via reflection; store consteval query results in constexpr variables before runtime use.",
+   "code": "#include <meta>\n#include <print>\n#include <string_view>\nstruct Widget {};\nint main() {\n  constexpr std::string_view tn = std::meta::identifier_of(^^Widget);\n  constexpr std::string_view dn =\n      std::meta::display_string_of(^^unsigned long);\n  std::println(\"{} {}\", tn, dn);\n}",
+   "run_stdout": "Widget long unsigned int\n"
+  },
+  {
+   "id": "type-name-user-types",
+   "task": "Use reflection to print the names of two user-defined types.",
+   "code": "#include <meta>\n#include <print>\n#include <string_view>\nclass Engine {};\nstruct Chassis {};\nint main() {\n  constexpr std::string_view a = std::meta::identifier_of(^^Engine);\n  constexpr std::string_view b = std::meta::identifier_of(^^Chassis);\n  std::println(\"{} {}\", a, b);\n}",
+   "run_stdout": "Engine Chassis\n"
+  },
+  {
+   "id": "template-for-instance-splice",
+   "task": "'template for' over a struct's members printing values \u2014 splice on an INSTANCE (obj.[:m:]), never on the type name.",
+   "code": "#include <meta>\n#include <print>\nstruct Sensor { int id = 5; double reading = 2.5; float scale = 1.5f; };\nint main() {\n  Sensor s{};\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Sensor, std::meta::access_context::current()))) {\n    std::println(\"{} = {}\", std::meta::identifier_of(m), s.[:m:]);\n  }\n}",
+   "run_stdout": "id = 5\nreading = 2.5\nscale = 1.5\n"
+  },
+  {
+   "id": "template-for-sum",
+   "task": "Sum all int members of a struct with a 'template for' expansion over its reflected members.",
+   "code": "#include <meta>\n#include <print>\nstruct Score { int a = 10; int b = 20; int c = 12; };\nint main() {\n  Score sc{};\n  int total = 0;\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Score, std::meta::access_context::current()))) {\n    total += sc.[:m:];\n  }\n  std::println(\"{}\", total);\n}",
+   "run_stdout": "42\n"
+  },
+  {
+   "id": "contracts-abs",
+   "task": "Write int iabs(int) with a postcondition guaranteeing a nonnegative result, in C++26 contract syntax.",
+   "code": "#include <print>\nint iabs(int x)\n  post (r : r >= 0)\n{\n  return x < 0 ? -x : x;\n}\nint main() { std::println(\"{}\", iabs(-42)); }",
+   "run_stdout": "42\n"
+  },
+  {
+   "id": "contracts-div",
+   "task": "Write safe integer division with preconditions in C++26 contract syntax: nonzero divisor, nonnegative dividend.",
+   "code": "#include <print>\nint safe_div(const int a, const int b)\n  pre (b != 0)\n  pre (a >= 0)\n  post (r : r * b <= a)\n{\n  return a / b;\n}\nint main() { std::println(\"{}\", safe_div(17, 5)); }",
+   "run_stdout": "3\n"
+  },
+  {
+   "id": "contract-assert-loop",
+   "task": "Use contract_assert inside a loop to check an invariant while accumulating.",
+   "code": "#include <print>\nint sum_to(int n) {\n  int s = 0;\n  for (int i = 1; i <= n; ++i) {\n    s += i;\n    contract_assert(s >= i);\n  }\n  return s;\n}\nint main() { std::println(\"{}\", sum_to(10)); }",
+   "run_stdout": "55\n"
+  },
+  {
+   "id": "fixed-string-compare",
+   "task": "Give a consteval fixed_string NTTP type an operator== and select behavior by comparing template arguments at compile time.",
+   "code": "#include <print>\n#include <cstddef>\ntemplate <std::size_t N>\nstruct fixed_string {\n  char data[N]{};\n  consteval fixed_string(const char (&s)[N]) {\n    for (std::size_t i = 0; i < N; ++i) data[i] = s[i];\n  }\n};\ntemplate <std::size_t N, std::size_t M>\nconsteval bool same(const fixed_string<N>& a, const fixed_string<M>& b) {\n  if (N != M) return false;\n  for (std::size_t i = 0; i < N; ++i)\n    if (a.data[i] != b.data[i]) return false;\n  return true;\n}\ntemplate <fixed_string Tag>\nconstexpr int channel() {\n  if constexpr (same(Tag, fixed_string{\"fast\"})) return 1;\n  else return 0;\n}\nint main() { std::println(\"{} {}\", channel<\"fast\">(), channel<\"slow\">()); }",
+   "run_stdout": "1 0\n"
+  },
+  {
+   "id": "fixed-string-size",
+   "task": "Extend a consteval fixed_string NTTP with a size() member and use it from a template.",
+   "code": "#include <print>\n#include <cstddef>\ntemplate <std::size_t N>\nstruct fixed_string {\n  char data[N]{};\n  consteval fixed_string(const char (&s)[N]) {\n    for (std::size_t i = 0; i < N; ++i) data[i] = s[i];\n  }\n  static consteval std::size_t size() { return N - 1; }\n};\ntemplate <fixed_string S>\nconstexpr std::size_t len = S.size();\nint main() { std::println(\"{}\", len<\"reflection\">); }",
+   "run_stdout": "10\n"
+  },
+  {
+   "id": "constexpr-string-build",
+   "task": "Build a std::string inside a constexpr function and validate its size with static_assert.",
+   "code": "#include <print>\n#include <string>\nconstexpr std::size_t joined_len() {\n  std::string s;\n  for (int i = 0; i < 4; ++i) s += \"ab\";\n  return s.size();\n}\nstatic_assert(joined_len() == 8);\nint main() { std::println(\"{}\", joined_len()); }",
+   "run_stdout": "8\n"
+  },
+  {
+   "id": "splice-second-member",
+   "task": "Access the SECOND data member of a struct through an indexed reflection and splicing on an instance.",
+   "code": "#include <meta>\n#include <print>\nstruct Pairish { int first = 4; int second = 11; };\nint main() {\n  constexpr auto members = std::define_static_array(\n      std::meta::nonstatic_data_members_of(\n          ^^Pairish, std::meta::access_context::current()));\n  Pairish p;\n  std::println(\"{}\", p.[:members[1]:]);\n}",
+   "run_stdout": "11\n"
+  },
+  {
+   "id": "struct-to-tuple-three",
+   "task": "Generic struct_to_tuple over a three-member struct via reflection; print all three.",
+   "code": "#include <meta>\n#include <print>\n#include <tuple>\nstruct Trio { int a = 1; double b = 2.5; long c = 9; };\ntemplate <typename T>\nconstexpr auto struct_to_tuple(const T& t) {\n  return [&]<std::size_t... I>(std::index_sequence<I...>) {\n    constexpr auto ctx = std::meta::access_context::current();\n    return std::make_tuple(\n        t.[:std::meta::nonstatic_data_members_of(^^T, ctx)[I]:]...);\n  }(std::make_index_sequence<\n        std::meta::nonstatic_data_members_of(\n            ^^T, std::meta::access_context::current()).size()>{});\n}\nint main() {\n  auto tup = struct_to_tuple(Trio{});\n  std::println(\"{} {} {}\", std::get<0>(tup), std::get<1>(tup),\n               std::get<2>(tup));\n}",
+   "run_stdout": "1 2.5 9\n"
+  },
+  {
+   "id": "members-print-count",
+   "task": "Print a struct's member names and then the member count, both from reflection.",
+   "code": "#include <meta>\n#include <print>\nstruct Job { int prio; long id; bool active; };\nint main() {\n  constexpr auto ctx = std::meta::access_context::current();\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(^^Job, ctx))) {\n    std::println(\"{}\", std::meta::identifier_of(m));\n  }\n  constexpr auto count =\n      std::meta::nonstatic_data_members_of(^^Job, ctx).size();\n  std::println(\"count={}\", count);\n}",
+   "run_stdout": "prio\nid\nactive\ncount=3\n"
+  },
+  {
+   "id": "contracts-const-param-root",
+   "task": "Integer root with a precondition on the argument and a postcondition referencing it. A value parameter used in a postcondition must be declared const \u2014 write const int x even when a sketch shows plain int.",
+   "code": "#include <print>\nint iroot(const int x)\n  pre (x >= 0)\n  post (r : r * r <= x)\n{\n  int r = 0;\n  while ((r + 1) * (r + 1) <= x) ++r;\n  return r;\n}\nint main() { std::println(\"{}\", iroot(30)); }",
+   "run_stdout": "5\n"
+  },
+  {
+   "id": "constexpr-vector-return-scalar",
+   "task": "A constexpr function may build and transform a std::vector internally, but must return a non-allocating scalar \u2014 allocations cannot escape constant evaluation.",
+   "code": "#include <print>\n#include <vector>\nconstexpr int max_tripled() {\n  std::vector<int> v{3, 9, 4};\n  for (auto& x : v) x *= 3;\n  int m = 0;\n  for (int x : v)\n    if (x > m) m = x;\n  return m;\n}\nstatic_assert(max_tripled() == 27);\nint main() { std::println(\"{}\", max_tripled()); }",
+   "run_stdout": "27\n"
+  },
+  {
+   "id": "template-for-single-letter-struct",
+   "task": "Iterate members of a struct with a short type name using 'template for'. Even when the struct is named like a variable (Q), create an instance (Q q{};) and splice on the instance: q.[:m:].",
+   "code": "#include <meta>\n#include <print>\nstruct Q { int a = 7; double b = 0.5; };\nint main() {\n  Q q{};\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Q, std::meta::access_context::current()))) {\n    std::println(\"{} = {}\", std::meta::identifier_of(m), q.[:m:]);\n  }\n}",
+   "run_stdout": "a = 7\nb = 0.5\n"
   }
  ],
  "statements": [
@@ -85,6 +187,52 @@
   "A structural type with a consteval constructor, like a fixed_string<N> holding a char array, can be used as a non-type template parameter in C++26.",
   "Reflection queries and <meta> facilities are consteval: they execute during compilation, so their results can feed static_assert and template arguments.",
   "std::meta::display_string_of(r) produces a human-readable description of the reflected entity, e.g. the type name for a type reflection.",
-  "GCC's C++26 reflection is enabled with -std=c++26 -freflection; contracts with -fcontracts (and a contract-evaluation semantic such as enforce)."
+  "GCC's C++26 reflection is enabled with -std=c++26 -freflection; contracts with -fcontracts (and a contract-evaluation semantic such as enforce).",
+  "std::meta::identifier_of returns std::string_view; an owned std::string requires explicit construction: std::string(std::meta::identifier_of(e)).",
+  "Consteval reflection queries must run in constant-expression contexts: store identifier_of/display_string_of results in constexpr variables before using them at runtime.",
+  "A data member's value is read by splicing on an instance, obj.[:m:]; writing TypeName.[:m:] is an error.",
+  "Contract pre/post conditions appear between the function declarator and the body: int f(int x) pre (x > 0) post (r : r >= x) { ... }.",
+  "A value parameter referenced in a postcondition must be declared const: int div(const int a, const int b) post (r : r * b <= a).",
+  "If a task sketches int f(int x) but the postcondition mentions x, the compiling signature is int f(const int x) \u2014 correctness overrides the sketch.",
+  "A constexpr function can use std::vector internally but must not return it; return the computed scalar (sum, max, size) instead.",
+  "Splice member access always needs an instance: declare one (V v{};) and write v.[:m:], never V.[:m:]."
+ ],
+ "repairs": [
+  {
+   "id": "fix-const-contract",
+   "broken": "#include <print>\nint iroot(int x)\n  pre (x >= 0)\n  post (r : r * r <= x)\n{\n  int r = 0;\n  while ((r + 1) * (r + 1) <= x) ++r;\n  return r;\n}\nint main() { std::println(\"{}\", iroot(30)); }",
+   "stderr": "main.cpp:5:22: error: a value parameter used in a postcondition must be const\n    5 |   post (r : r * r <= x)\n      |                      ^\nmain.cpp:3:15: note: parameter declared here\n    3 | int iroot(int x)\n      |           ~~~~^\nmain.cpp:5:22: error: a value parameter used in a postcondition must be const\n    5 |   post (r : r * r <= x)\n      |                      ^\nmain.cpp:3:15: note: parameter declared here\n    3 | int iroot(int x)\n      |           ~~~~^\n",
+   "fixed": "#include <print>\nint iroot(const int x)\n  pre (x >= 0)\n  post (r : r * r <= x)\n{\n  int r = 0;\n  while ((r + 1) * (r + 1) <= x) ++r;\n  return r;\n}\nint main() { std::println(\"{}\", iroot(30)); }"
+  },
+  {
+   "id": "fix-type-splice",
+   "broken": "#include <meta>\n#include <print>\nstruct Sensor { int id = 5; double reading = 2.5; };\nint main() {\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Sensor, std::meta::access_context::current()))) {\n    std::println(\"{} = {}\", std::meta::identifier_of(m), Sensor.[:m:]);\n  }\n}",
+   "stderr": "main.cpp: In function 'int main()':\nmain.cpp:10:64: error: expected primary-expression before '.' token\n   10 |     std::println(\"{} = {}\", std::meta::identifier_of(m), Sensor.[:m:]);\n      |                                                                ^\n",
+   "fixed": "#include <meta>\n#include <print>\nstruct Sensor { int id = 5; double reading = 2.5; };\nint main() {\n  Sensor s{};\n  template for (constexpr auto m :\n                std::define_static_array(\n                    std::meta::nonstatic_data_members_of(\n                        ^^Sensor, std::meta::access_context::current()))) {\n    std::println(\"{} = {}\", std::meta::identifier_of(m), s.[:m:]);\n  }\n}"
+  },
+  {
+   "id": "fix-consteval-runtime",
+   "broken": "#include <meta>\n#include <print>\nstruct Widget {};\nint main() {\n  auto r = ^^Widget;\n  std::println(\"{}\", std::meta::identifier_of(r));\n}",
+   "stderr": "main.cpp: In function 'int main()':\nmain.cpp:6:14: error: consteval-only variable 'r' not declared 'constexpr' used outside a constant-evaluated context\n    6 |   auto r = ^^Widget;\n      |              ^~~~~~\nmain.cpp:6:8: note: add 'constexpr'\n    6 |   auto r = ^^Widget;\n      |        ^\nmain.cpp:7:46: error: call to consteval function 'std::meta::identifier_of(r)' is not a constant expression\n    7 |   std::println(\"{}\", std::meta::identifier_of(r));\n      |                      ~~~~~~~~~~~~~~~~~~~~~~~~^~~\nmain.cpp:7:47: error: the value of 'r' is not usable in a constant expression\n    7 |   std::println(\"{}\", std::meta::identifier_of(r));\n      |                                               ^\nmain.cpp:6:8: note: 'r' was not declared 'constexpr'\n    6 |   auto r = ^^Widget;\n      |  ",
+   "fixed": "#include <meta>\n#include <print>\n#include <string_view>\nstruct Widget {};\nint main() {\n  constexpr std::string_view name = std::meta::identifier_of(^^Widget);\n  std::println(\"{}\", name);\n}"
+  },
+  {
+   "id": "fix-constexpr-vector-escape",
+   "broken": "#include <print>\n#include <vector>\nconstexpr std::vector<int> tripled() {\n  std::vector<int> v{1, 2, 3};\n  for (auto& x : v) x *= 3;\n  return v;\n}\nconstexpr std::vector<int> V = tripled();\nint main() { std::println(\"{}\", V[2]); }",
+   "stderr": "main.cpp:9:40: error: 'tripled()' is not a constant expression because it refers to a result of 'operator new'\n    9 | constexpr std::vector<int> V = tripled();\n      |                                        ^\nIn file included from /opt/gcc-16.1/include/c++/16.1.0/string:46,\n                 from /opt/gcc-16.1/include/c++/16.1.0/bits/stdexcept_throw.h:57,\n                 from /opt/gcc-16.1/include/c++/16.1.0/array:44,\n                 from /opt/gcc-16.1/include/c++/16.1.0/format:46,\n                 from /opt/gcc-16.1/include/c++/16.1.0/print:43,\n                 from main.cpp:2:\n/opt/gcc-16.1/include/c++/16.1.0/bits/allocator.h:203:52: note: allocated here\n  203 |             return static_cast<_Tp*>(::operator new(__n));\n      |                                      ~~~~~~~~~~~~~~^~~~~\n",
+   "fixed": "#include <print>\n#include <vector>\nconstexpr int tripled_back() {\n  std::vector<int> v{1, 2, 3};\n  for (auto& x : v) x *= 3;\n  return v.back();\n}\nstatic_assert(tripled_back() == 9);\nint main() { std::println(\"{}\", tripled_back()); }"
+  },
+  {
+   "id": "fix-const-contract-2",
+   "broken": "#include <print>\nint clamp_below(int v, int hi)\n  pre (hi > 0)\n  post (r : r <= hi)\n{\n  return v > hi ? hi : v;\n}\nint main() { std::println(\"{}\", clamp_below(9, 5)); }",
+   "stderr": "main.cpp:5:18: error: a value parameter used in a postcondition must be const\n    5 |   post (r : r <= hi)\n      |                  ^~\nmain.cpp:3:28: note: parameter declared here\n    3 | int clamp_below(int v, int hi)\n      |                        ~~~~^~\nmain.cpp:5:18: error: a value parameter used in a postcondition must be const\n    5 |   post (r : r <= hi)\n      |                  ^~\nmain.cpp:3:28: note: parameter declared here\n    3 | int clamp_below(int v, int hi)\n      |                        ~~~~^~\n",
+   "fixed": "#include <print>\nint clamp_below(const int v, const int hi)\n  pre (hi > 0)\n  post (r : r <= hi)\n{\n  return v > hi ? hi : v;\n}\nint main() { std::println(\"{}\", clamp_below(9, 5)); }"
+  },
+  {
+   "id": "fix-string-view-conv",
+   "broken": "#include <meta>\n#include <print>\n#include <string>\nenum class Hue { Red, Blue };\ntemplate <typename Ee>\nconstexpr std::string enum_str(Ee v) {\n  template for (constexpr auto e :\n                std::define_static_array(std::meta::enumerators_of(^^Ee))) {\n    if (v == [:e:]) return std::meta::identifier_of(e);\n  }\n  return \"?\";\n}\nint main() { std::println(\"{}\", enum_str(Hue::Blue)); }",
+   "stderr": "main.cpp: In function 'constexpr std::string enum_str(Ee)':\nmain.cpp:10:52: error: could not convert 'std::meta::identifier_of(e)' from 'std::string_view' {aka 'std::basic_string_view<char>'} to 'std::string' {aka 'std::__cxx11::basic_string<char>'} [-Wtemplate-body]\n   10 |     if (v == [:e:]) return std::meta::identifier_of(e);\n      |                            ~~~~~~~~~~~~~~~~~~~~~~~~^~~\n      |                                                    |\n      |                                                    std::string_view {aka std::basic_string_view<char>}\nIn file included from /opt/gcc-16.1/include/c++/16.1.0/string:58,\n                 from /opt/gcc-16.1/include/c++/16.1.0/bits/stdexcept_throw.h:57,\n                 from /opt/gcc-16.1/include/c++/16.1.0/array:44,\n                 fro",
+   "fixed": "#include <meta>\n#include <print>\n#include <string>\nenum class Hue { Red, Blue };\ntemplate <typename Ee>\nconstexpr std::string enum_str(Ee v) {\n  template for (constexpr auto e :\n                std::define_static_array(std::meta::enumerators_of(^^Ee))) {\n    if (v == [:e:]) return std::string(std::meta::identifier_of(e));\n  }\n  return \"?\";\n}\nint main() { std::println(\"{}\", enum_str(Hue::Blue)); }"
+  }
  ]
 }

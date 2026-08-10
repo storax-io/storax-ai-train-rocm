@@ -4,127 +4,74 @@
 AMD ROCm — the same code targets consumer Radeon GPUs and
 [LUMI](https://lumi-supercomputer.eu/) (MI250X).**
 
-This is not a benchmark or a demo: it is the pipeline we intend to run
-on LUMI, developed and de-risked end-to-end on a single Radeon RX
-7800 XT (gfx1101, 16 GiB). One codebase runs in three environments —
-Windows-native ROCm, WSL2 Linux ROCm, and the LUMI AI Factory container
-(`lumi-multitorch-full`) — with the same smoke tests gating every one of
-them. Every configuration knob that changes between environments
-(attention backend, batch geometry, frozen modules, system prompt,
-staging paths) is a CLI flag or env var, not a code fork.
+Not a benchmark: this is the pipeline intended for LUMI, developed and
+de-risked end-to-end on a single Radeon RX 7800 XT (gfx1101, 16 GiB).
+One codebase runs on Windows-native ROCm, WSL2 Linux ROCm, and the LUMI
+AI Factory container (`lumi-multitorch-full`), gated by the same smoke
+tests everywhere; environment differences are flags and env vars, not
+code forks.
 
-## The pipeline
+## What it demonstrates
 
-1. **Verifiable dataset** ([tools/build_dataset.py](tools/build_dataset.py)):
-   crawls Wikipedia (presidents of Finland + their parties, ~97k tokens),
-   extracts structured facts, and generates training text: article
-   chunks, paraphrased statements, full-sentence chat QA, and
-   constructed thinking-mode traces (never self-distilled).
-2. **Training** ([traintest/train.py](traintest/train.py)): full bf16
-   fine-tune — Adafactor (absolute-lr), gradient checkpointing,
-   fixed-shape packed batches, warmup + linear LR decay, replay
-   anchoring with the base model's own outputs. Fits 3B–4B models in
-   16 GiB; on MI250X the same script scales batch/seq instead.
-3. **Verification** ([traintest/evaluate.py](traintest/evaluate.py)):
-   seven tiers, run before and after every training:
-   | tier | proves |
-   |---|---|
-   | trained facts | knowledge was injected |
-   | paraphrases (never-trained wordings) | knowledge, not format-matching |
-   | composition (incl. reversed relations) | facts combine; reversal curse handled |
-   | multihop (computed questions) | derivation over stored facts (± thinking mode) |
-   | adjacent knowledge | nearby world knowledge not damaged |
-   | control (synthetic, never trained) | eval isn't leaking |
-   | retention (general QA) | no catastrophic forgetting |
+**1 — Verified knowledge injection** (SmolLM3-3B, full bf16 fine-tune):
+facts the model provably lacked reach **96%** recall, **95%** on
+never-trained paraphrases, **95%** composition, with adjacent knowledge,
+control (leak guard) and retention (forgetting guard) all clean. Seven
+eval tiers ([traintest/evaluate.py](traintest/evaluate.py)) run before
+and after every training.
 
-The eval tiers exist because naive versions of this pipeline *passed*
-naive tests while producing bad models — each tier encodes a failure
-mode we actually hit (see Findings).
+**2 — Compiler-verified capability training**
+([traintest/oracle_eval.py](traintest/oracle_eval.py)): generation →
+g++ oracle ([storax-gcc-oracle](https://github.com/storax-io/storax-gcc-oracle),
+GCC 16.1, C++26 reflection + contracts) → compile/run verdicts. The
+compiler is ground truth: the training corpus itself is oracle-verified
+(every exemplar must compile *and* run before it may teach), and the
+held-out probe suite is judged the same way. Ministral-3-3B:
+**1/10 → 7/10** compile+run after 8 minutes of training; remaining
+failures are single-error near-misses, driven toward 10/10 by dynamic
+training rounds ([tools/cpp26_loop.py](tools/cpp26_loop.py)) that add
+oracle-verified remedials per failing error class.
 
-## Status: validated on consumer ROCm
+**3 — Multi-node mechanics** ([tests/smoke_dist.py](tests/smoke_dist.py)):
+`train.py` is torchrun-native — DDP, rank-strided sharding, `no_sync`
+accumulation, rank-0 artifacts, nccl/RCCL or gloo backend — verified by
+a simulated 2-rank run on the container-pinned stack (torch 2.10 +
+transformers v5). RCCL, fabric and Slurm remain first-hours-on-LUMI
+items.
 
-SmolLM3-3B, full fine-tune, RX 7800 XT:
+**4 — Measured hardware numbers** (RX 7800 XT, 74.65 TFLOPS peak bf16;
+3–3.85B models, bf16 + activation checkpointing, 8·N FLOPs/token):
 
-| set | before | after |
-|---|---|---|
-| trained facts | 32.0% | **96.1%** |
-| paraphrases | 28.2% | **94.9%** |
-| composition incl. reversals | 52.6% | **94.7%** |
-| adjacent knowledge | 87.5% | **100%** |
-| control / retention | 0 · 10/10 | 0 · 10/10 |
+| stack | steady computed tok/s | MFU | notes |
+|---|---|---|---|
+| Windows ROCm preview | 827 | 27.3% | math SDPA; batch-2 seq-256 |
+| **WSL2 Linux ROCm (librocdxg)** | **825–829** | **33.4–34.2%** | batch-1 seq-320; sustained across 700–2,300-step runs |
 
-Thinking mode (SmolLM3 hybrid reasoning): multihop questions improve
-62.5% → 87.5% with thinking; trace training caused zero no-think damage
-and raised paraphrase robustness +15 pts.
-
-**Ministral-3-3B** (multimodal Mistral 3, vision tower frozen), Linux
-ROCm + transformers v5 — the exact software surface of the LUMI
-container:
-
-| set | before | after (2 epochs, anchored) |
-|---|---|---|
-| trained facts | 43.7% | **92.2%** |
-| paraphrases | 41.0% | **97.4%** |
-| composition | 52.6% | **78.9%** |
-| adjacent knowledge | 87.5% | 62.5% (known limitation¹) |
-| control / retention | 0 · 9/10 | 0 · **10/10** |
-
-¹ Historical-content bleed (e.g. markka-era articles shifting currency
-beliefs) — diagnosed across four gated iterations (12.5% → 62.5% as
-missing replay anchors, cross-model replay, and think-format pollution
-were each identified and fixed). The candid failure ledger is the point:
-the gates catch damaged runs whose training metrics look perfect.
-
-**Compiler-verified capability training** ([traintest/oracle_eval.py](traintest/oracle_eval.py)):
-generation → g++ oracle ([storax-gcc-oracle](https://github.com/storax-io/storax-gcc-oracle),
-GCC 16.1, C++26 reflection + contracts) → compile/run verdicts. No
-substring matching — the compiler is ground truth, and the training
-corpus itself is oracle-verified: every exemplar in
-[tools/build_cpp26_corpus.py](tools/build_cpp26_corpus.py) must compile
-AND run before it may teach (12/12 did). Ministral-3-3B on the held-out
-probe suite ([data/cpp26_probes.jsonl](data/cpp26_probes.jsonl)):
-
-| | compile+run rate |
-|---|---|
-| before | 1/10 (pre-C++26 pseudo-syntax) |
-| after 8 min of training | **7/10** — remaining failures are single-error near-misses |
-
-**Multi-node training** ([tests/smoke_dist.py](tests/smoke_dist.py)):
-`train.py` is torchrun-native — DDP with rank-strided sharding, `no_sync`
-gradient accumulation, non-reentrant checkpointing, rank-0 artifacts;
-backend auto-selects nccl/RCCL on GPUs, gloo on CPU. Verified by a
-simulated 2-rank run on the container-pinned stack (torch 2.10 +
-transformers v5). Simulation covers the DDP mechanics; RCCL, fabric and
-Slurm remain first-hours-on-LUMI items.
-
-Measured performance (same silicon, two stacks — the stack delta is why
-LUMI numbers are projected conservatively):
-
-| stack | steady computed tok/s | MFU |
-|---|---|---|
-| Windows ROCm preview (math SDPA) | 827 | 27.3% |
-| **WSL2 Linux ROCm (librocdxg)** | **825+ @ batch 1** | **34%** |
+Supporting measurements: 3.85B multimodal full FT (frozen vision +
+embeddings) peaks at **13.5 GiB**; a 3-epoch ~290k-token training runs
+in **12–19 min** wall; Linux batch-1 steps are 0.38–0.40 s where Windows
+WDDM overhead makes them 2.7 s; Linux Triton softmax reaches 1.48× eager
+(Windows fork: 1.06×). The measured Windows→Linux MFU delta on identical
+silicon is why LUMI projections from these numbers
+([docs/lumi-numbers.md](docs/lumi-numbers.md)) are conservative floors —
+consumer math-SDPA MFU already lands at the bottom of the 30–50% band
+published MI250X trainings achieve.
 
 ## Running on LUMI
 
-- **Container**: validated against `lumi-multitorch-full`
+- **Container**: API surface validated against `lumi-multitorch-full`
   (torch 2.10 / ROCm 7.0.2 / transformers v5 / Python 3.12) —
-  [tests/smoke_lumi_compat.py](tests/smoke_lumi_compat.py) exercises the
-  full API surface, 16/16 PASS. One v5 incompatibility was found this
-  way and fixed before any LUMI hours
-  ([traintest/hfcompat.py](traintest/hfcompat.py)); details in
-  [docs/lumi-compat-report.md](docs/lumi-compat-report.md).
+  [tests/smoke_lumi_compat.py](tests/smoke_lumi_compat.py), 16/16 PASS;
+  one v5 incompatibility caught and fixed before any LUMI hours
+  ([docs/lumi-compat-report.md](docs/lumi-compat-report.md)).
 - **Attention**: `--attn flash_attention_2` selects the container's
-  flash-attn 2 on gfx90a (consumer measurements used math SDPA, so the
-  MFU floor is conservative).
-- **Sizing**: GPU-hour tables per model size at measured MFU,
-  MI250X/MI300X projections, and a Poro-34B sanity anchor:
-  [docs/lumi-numbers.md](docs/lumi-numbers.md) ·
+  flash-attn 2 on gfx90a (consumer MFU was measured on math SDPA).
+- **Sizing**: GPU-hour tables at measured MFU, MI250X/MI300X projections,
+  Poro-34B sanity anchor: [docs/lumi-numbers.md](docs/lumi-numbers.md) ·
   [tools/estimate.py](tools/estimate.py).
-- **First hours on allocation**: run `smoke_env.py` and
-  `smoke_train.py --quick` in-container, re-measure MFU with FA2,
-  update the GPU-hour table with the LUMI-native floor; then scale the
-  same `train.py` via Slurm.
+- **First allocation hours**: `smoke_env.py` + `smoke_train.py --quick`
+  in-container, re-measure MFU with FA2, then scale the same `train.py`
+  via Slurm.
 
 ## Quickstart (consumer ROCm)
 
@@ -144,49 +91,40 @@ scripts/run_linux.sh env_probe.py
 **Windows-native ROCm** (AMD PyTorch-on-Windows preview): Python 3.12
 venv on the Windows side, torch from the same index, pin
 `transformers<5` (that build lacks `torch.distributed`), set
-`TRAINTEST_STAGE_WSL` / `TRAINTEST_STAGE_WIN` to your staging dir.
+`TRAINTEST_STAGE_WSL` / `TRAINTEST_STAGE_WIN`.
 
 **The suite** (tests run directly, not via pytest):
 
 ```bash
 python3 tests/smoke_env.py             # GPU + Triton kernel health
-python3 tests/smoke_train.py --quick   # pipeline + VRAM proof
 python3 tests/smoke_train.py           # full train + 7-tier verification
-.venv-lumi-compat/bin/python tests/smoke_lumi_compat.py  # LUMI container API surface
-scripts/run_linux.sh chat.py --model <run-dir>/model     # chat with the result
+python3 tests/smoke_oracle.py          # g++ oracle + compile-verified eval
+python3 tests/smoke_dist.py            # simulated 2-rank DDP
+.venv-lumi-compat/bin/python tests/smoke_lumi_compat.py  # container API surface
 ```
 
-## Findings (each fenced by a test)
+## ROCm training notes
 
-- **Fixed batch shapes are mandatory on ROCm** — ragged shapes
-  re-trigger GEMM autotune per shape: 16× slowdown.
-- **Optimizer lr semantics differ**: `torch.optim.Adafactor` scales lr
-  by parameter RMS — 1e-5 silently trains *nothing*. Use transformers'
-  Adafactor with `scale_parameter=False`.
-- **Constant LR on a small corpus mode-collapses** the model late in
-  training; warmup + linear decay to zero fixes it at identical final
-  loss.
-- **Train relations in both directions** — successor-only training left
-  predecessor queries at 0/4 (reversal curse).
-- **Knowledge injection needs structured densification** — raw article
-  exposure yields confabulation; QA/paraphrase-form facts reach 95%+.
-- **Windows-specific** (absent on Linux/LUMI): silent VRAM paging
-  instead of OOM (5–50× slowdown); WSL-side kills don't reach Windows
-  children; batch-1 per-step overhead ~triples step time.
-- **Model-specific traps**: Mistral templates inject a 536-token default
-  system prompt (override identically in train and eval); Mistral
-  tokenizers need `fix_mistral_regex=True`; SmolLM3 `<think>` tags are
-  special tokens stripped by default decoding; transformers v5 returns
-  `BatchEncoding` from `apply_chat_template`.
+- Keep batch shapes fixed (pack/pad to one `(batch, seq)` shape) —
+  ROCm autotunes GEMMs per shape.
+- Use transformers' Adafactor with `scale_parameter=False` (absolute lr)
+  plus warmup and linear decay to zero.
+- Densify facts into QA/paraphrase form and train relations in both
+  directions; anchor with replay generated by the model being trained.
+- Mistral models: override the default system prompt (identically in
+  train and eval) and load tokenizers with `fix_mistral_regex=True`.
+- transformers v5 returns `BatchEncoding` from `apply_chat_template`;
+  handled in [traintest/hfcompat.py](traintest/hfcompat.py).
 
 ## Repository layout
 
 ```
 traintest/       training, evaluation, chat REPL, probes (model-agnostic)
-tools/           dataset crawler, Instinct/LUMI throughput estimator
-tests/           smoke suites: environment, train+verify, LUMI compat
+tools/           dataset builders (Wikipedia, oracle-verified C++26),
+                 dynamic training rounds, LUMI throughput estimator
+tests/           smoke suites: env, train+verify, oracle, dist, LUMI compat
 scripts/         backend runners (run_linux.sh, run_win.sh)
-data/            crawled dataset + replay anchors (regenerate with tools/)
+data/            datasets + replay anchors (regenerate with tools/)
 docs/            LUMI application numbers + container compat report
 ```
 
