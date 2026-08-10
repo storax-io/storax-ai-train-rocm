@@ -28,6 +28,13 @@ _DIR = Path(os.environ.get(
 SYNTH_TEXT_N = int(os.environ.get("CPP26DS_SYNTH_TEXT", "1200"))
 SYNTH_QA_N = int(os.environ.get("CPP26DS_SYNTH_QA", "300"))
 
+# Training mixture policy: new-features / current-standard / general
+# language skills. Enforced by duplicating or subsampling the baseline
+# pool relative to the C++26 pool; the general share is the chat replay
+# handled by train.py (its count is included in the report only).
+MIX = tuple(int(x) for x in
+            os.environ.get("CPP26DS_MIX", "70,20,10").split(","))
+
 
 def _rows(name):
     f = _DIR / name
@@ -78,8 +85,20 @@ def _cpp_replay():
 
 def training_qa_pairs():
     out = []
-    for r in _cpp_replay():
-        out.append((r["prompt"], _fenced(r["code"])))
+    # C++23 baseline pool, rebalanced to MIX[1]/MIX[0] of the C++26 QA
+    # mass (duplication is fine: anchors are few and oracle-verified).
+    new_mass = (len(_BASES) + len(_TRACES) + SYNTH_QA_N + len(_EDITS)
+                + len(_MUTS))
+    base_pool = _cpp_replay()
+    if base_pool:
+        target = max(1, int(new_mass * MIX[1] / MIX[0]))
+        reps = max(1, round(target / len(base_pool)))
+        print(f"mix: c++26={new_mass} baseline_target={target} "
+              f"({len(base_pool)} anchors x{reps}); general share is "
+              f"replay.json in train.py", flush=True)
+        for _ in range(reps):
+            for r in base_pool:
+                out.append((r["prompt"], _fenced(r["code"])))
     for r in _BASES.values():
         out.append((r["prompt"] + " Only output the code.",
                     _fenced(r["source"])))
