@@ -225,3 +225,4 @@ traintest/replay*.json
 
 # internal/ never committed (deployment plans, application strategy)
 internal/
+traintest/cpp_replay.json

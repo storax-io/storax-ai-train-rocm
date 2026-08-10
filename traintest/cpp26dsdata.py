@@ -63,8 +63,23 @@ def training_texts():
     return []
 
 
+def _cpp_replay():
+    """Oracle-filtered self-distillation anchors for ordinary modern C++
+    (gen_cpp_replay.py) — counterweight to feature-dense drills, which
+    otherwise erode plain C++ (measured: struct-syntax failures and
+    composition-family regressions in cycle 2)."""
+    f = Path(__file__).resolve().parent / "cpp_replay.json"
+    if not f.exists():
+        print("cpp_replay.json missing — plain-C++ erosion likely "
+              "(run gen_cpp_replay.py)", flush=True)
+        return []
+    return json.loads(f.read_text(encoding="utf-8"))
+
+
 def training_qa_pairs():
     out = []
+    for r in _cpp_replay():
+        out.append((r["prompt"], _fenced(r["code"])))
     for r in _BASES.values():
         out.append((r["prompt"] + " Only output the code.",
                     _fenced(r["source"])))
