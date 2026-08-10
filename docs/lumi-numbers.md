@@ -42,6 +42,16 @@ MI250X, 1T tokens, TP2/PP4/DP128, activation ckpt) at our 27.3% floor
 implies ~59 days pure compute on that partition — consistent with the
 actual months-scale campaign.
 
+## Oracle throughput (compile verification)
+
+Measured ~69 compiles/s sustained on a 16-core Zen 5 host (≈4.3/s/core);
+a LUMI-G node's 64-core EPYC conservatively ~100 compiles/s. Demand side:
+8 GCDs generating at the measured ~800 tok/s each produce ~30–35 candidate
+programs/s (at ~200 tokens/program) — the co-located on-node oracle has
+~3× headroom over the GPUs' maximum generation rate, so verification
+never gates the training/reward loop; LUMI-C spillover via client-side
+sharding remains available as insurance.
+
 ## Why the floor is conservative for LUMI
 
 Our MFU was measured on a **consumer RDNA3 GPU under Windows ROCm

@@ -62,7 +62,19 @@ def main():
     tasks = [json.loads(l) for l in Path(args.suite).read_text().splitlines()
              if l.strip()]
     if args.limit:
-        tasks = tasks[: args.limit]
+        # Stratify across template families — suites are grouped, so a
+        # head-slice samples a single family (measured: 24/24 same family,
+        # gated by one shared syntax form).
+        by_fam = {}
+        for t in tasks:
+            by_fam.setdefault(t.get("family", ""), []).append(t)
+        picked, i = [], 0
+        while len(picked) < args.limit and any(by_fam.values()):
+            for fam in sorted(by_fam):
+                if by_fam[fam] and len(picked) < args.limit:
+                    picked.append(by_fam[fam].pop(0))
+            i += 1
+        tasks = picked
 
     results = []
     ok_count = 0

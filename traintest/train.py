@@ -169,10 +169,14 @@ def main():
     ap.add_argument("--only-think", action="store_true",
                     help="continue-training: think-QA + replay anchors only "
                          "(use with --model <trained dir>)")
+    ap.add_argument("--min-free-vram", type=float, default=6.0,
+                    help="GiB of free VRAM required at launch (model load "
+                         "happens before this check; grads/activations after)")
     ap.add_argument("--dist-backend", default="",
                     help="override process-group backend (default: nccl "
                          "with CUDA/ROCm, gloo on CPU)")
-    ap.add_argument("--data", default="facts", choices=["facts", "cpp26"],
+    ap.add_argument("--data", default="facts",
+                    choices=["facts", "cpp26", "cpp26ds"],
                     help="training data provider module")
     ap.add_argument("--system", default=None,
                     help="short system-prompt override for all chat samples "
@@ -244,6 +248,8 @@ def main():
 
     if args.data == "cpp26":
         import cpp26data as data_mod
+    elif args.data == "cpp26ds":
+        import cpp26dsdata as data_mod
     else:
         data_mod = facts
     samples = build_samples(tok, args.seq_len, only_think=args.only_think,
@@ -265,6 +271,15 @@ def main():
             print(f"vram: {free_b / 2**30:.1f} GiB free of "
                   f"{total_b / 2**30:.1f} before training "
                   f"(desktop shares this GPU)", flush=True)
+        # Refuse doomed runs instead of crashing into them: the desktop
+        # (DWM has been observed leaking to 18+ GiB) can leave too little
+        # VRAM, and the failure then surfaces as confusing HIP errors or
+        # silent paging mid-run. Override with --min-free-vram 0.
+        if free_b / 2**30 < args.min_free_vram:
+            raise SystemExit(
+                f"ABORT: only {free_b / 2**30:.1f} GiB free VRAM "
+                f"(< {args.min_free_vram} required). Close GPU-heavy apps "
+                f"or restart dwm.exe, then retry.")
         torch.cuda.reset_peak_memory_stats()
     step = 0
     tokens_done = 0
