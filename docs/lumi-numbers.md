@@ -9,11 +9,17 @@ checkpointing, Adafactor) on AMD ROCm — torch 2.11.0+rocm7.13.0:
 
 | quantity | value | run |
 |---|---|---|
-| Steady training throughput | **827 computed tok/s** | full5, RX 7800 XT (gfx1101, 16 GiB) |
-| Model FLOPs Utilization | **27.3%** of 74.65 TFLOPS peak bf16 | full5 |
-| Peak VRAM (3B full FT) | 13.2–15.4 GiB | full4/5 |
-| Training correctness | facts 32%→96%, paraphrase 80%, composition+reversals 95%, adjacent 100%, zero forgetting | full6 |
-| Triton kernels on gfx11 | numerics verified; torch.compile of full training graph exact | smoke_env / perf-compile |
+| Steady training throughput | **827 computed tok/s** (Windows) / **829 tok/s** (WSL Linux) | full5 / mistral4 |
+| Model FLOPs Utilization | Windows 27.3% → **WSL Linux ROCm 34.2%**, sustained over 2,300-step runs | full5 / mistral1-4 |
+| Peak VRAM | 13.5 GiB (3.85B multimodal, frozen vision+embed) | mistral1-4 |
+| Training correctness (SmolLM3) | facts 32%→96%, paraphrase 80%, composition+reversals 95%, adjacent 100%, zero forgetting | full6 |
+| Training correctness (Ministral-3-3B, transformers v5) | facts 44%→92%, paraphrase 97%, retention 100% | mistral3 |
+| Triton kernels | gfx1101 numerics verified on both stacks; Linux triton 1.48× eager softmax; torch.compile of full training graph exact | smoke_env / perf-compile |
+
+The Windows→Linux MFU delta (27.3% → 34.2%, same silicon, math-SDPA on
+both) is measured, not assumed — it grounds the claim that the tables
+below, built on consumer-stack numbers, are conservative for LUMI's
+CDNA2 + flash-attn 2 + hipBLASLt stack.
 
 MFU convention: 8·N FLOPs/token (fwd 2N + bwd 4N + recompute 2N), matching
 activation-checkpointed training (same convention as Poro's setup).

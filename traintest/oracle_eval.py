@@ -1,0 +1,95 @@
+"""Compiler-verified evaluation: the model generates C++ from prompts and
+the g++ oracle (GCC 16.1, C++26 reflection + contracts) judges each answer
+by compiling it. No substring matching — the compiler is the ground truth.
+
+  scripts/run_linux.sh oracle_eval.py --model <id-or-dir> \
+      --suite ../data/cpp26_probes.jsonl --url http://<oracle-host>:8950 \
+      --out <out.json>
+
+Suite format: JSONL with {id, prompt}; generation is greedy; the first
+```-fenced code block is compiled (whole output if no fence).
+"""
+import argparse
+import json
+import re
+from pathlib import Path
+
+import torch
+
+import hfcompat
+from oracle_client import Oracle
+
+
+def extract_code(text):
+    m = re.search(r"```(?:cpp|c\+\+|C\+\+)?\s*\n(.*?)```", text, re.S)
+    return (m.group(1) if m else text).strip()
+
+
+@torch.no_grad()
+def generate(model, tok, prompt, system, max_new):
+    ids = hfcompat.chat_prompt_ids(
+        tok, [{"role": "user", "content": prompt}], thinking=False,
+        system=system).unsqueeze(0).cuda()
+    out = model.generate(ids, attention_mask=torch.ones_like(ids),
+                         max_new_tokens=max_new, do_sample=False,
+                         pad_token_id=tok.eos_token_id)
+    return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--suite", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--url", default=None, help="oracle URL(s), else ORACLE_URL")
+    ap.add_argument("--system", default=None)
+    ap.add_argument("--max-new", type=int, default=700)
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--run", action="store_true", help="also execute a.out")
+    ap.add_argument("--attn", default="sdpa")
+    args = ap.parse_args()
+
+    oracle = Oracle(args.url) if args.url else Oracle()
+    print("oracle:", json.dumps(oracle.health()), flush=True)
+
+    tok = hfcompat.load_tokenizer(args.model)
+    model = hfcompat.load_causal_model(args.model, torch.bfloat16, args.attn)
+    model.cuda().eval()
+
+    tasks = [json.loads(l) for l in Path(args.suite).read_text().splitlines()
+             if l.strip()]
+    if args.limit:
+        tasks = tasks[: args.limit]
+
+    results = []
+    ok_count = 0
+    for t in tasks:
+        gen = generate(model, tok, t["prompt"], args.system, args.max_new)
+        code = extract_code(gen)
+        try:
+            verdict = oracle.compile(code, run=args.run)
+        except Exception as e:  # noqa: BLE001 — oracle/network failure
+            verdict = {"ok": False, "error": repr(e)}
+        ok = bool(verdict.get("ok")) and (not args.run
+                                          or verdict.get("run_rc") == 0)
+        ok_count += ok
+        results.append({"id": t["id"], "ok": ok,
+                        "rc": verdict.get("rc"),
+                        "ms": verdict.get("ms"),
+                        "stderr_head": (verdict.get("stderr") or "")[:400],
+                        "code_head": code[:200]})
+        print(f"{'PASS' if ok else 'FAIL'}  {t['id']}", flush=True)
+
+    report = {"model": args.model, "suite": args.suite, "run": args.run,
+              "compile_pass": ok_count, "total": len(tasks),
+              "rate": round(ok_count / max(1, len(tasks)), 3),
+              "results": results}
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps(report, indent=2))
+    print("RESULT " + json.dumps({"compile_rate": report["rate"],
+                                  "pass": ok_count, "total": len(tasks)}),
+          flush=True)
+
+
+if __name__ == "__main__":
+    main()

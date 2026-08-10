@@ -96,20 +96,35 @@ TOPICS = [
     "How do noise-cancelling headphones work?",
     "What is the boiling point of water at high altitude and why?",
     "Write two sentences describing a rainy morning.",
+    # Drift-zone anchors: the fine-tune's domain (Finnish presidents)
+    # bleeds into nearby European geography/institutions. These anchor
+    # the CATEGORY with the base model's own knowledge — deliberately
+    # not the adjacent-eval questions themselves.
+    "Give a brief overview of the Nordic countries.",
+    "What is the European Union and when was it formed?",
+    "What currency do most European Union countries use?",
+    "Describe the geography of Northern Europe.",
+    "Which languages are spoken in Scandinavia?",
+    "Tell me about the Baltic Sea region.",
+    "How does a parliamentary democracy work?",
+    "What are the capitals of the G7 countries?",
 ]
 
 
 def main():
     import argparse
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="HuggingFaceTB/SmolLM3-3B",
+                    help="replay MUST come from the model being trained — "
+                         "another model's outputs anchor the wrong distribution")
+    ap.add_argument("--system", default=None,
+                    help="system-prompt override; must match training")
     ap.add_argument("--think", action="store_true",
                     help="generate thinking-mode replay (trace + answer)")
     args = ap.parse_args()
 
-    model_id = "HuggingFaceTB/SmolLM3-3B"
-    tok = hfcompat.load_tokenizer(model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, dtype=torch.bfloat16, attn_implementation="sdpa")
+    tok = hfcompat.load_tokenizer(args.model)
+    model = hfcompat.load_causal_model(args.model, torch.bfloat16, "sdpa")
     model.cuda().eval()
 
     # Think traces are long; use fewer prompts and cap tightly so the
@@ -121,7 +136,7 @@ def main():
     for i, q in enumerate(topics):
         ids = hfcompat.chat_prompt_ids(
             tok, [{"role": "user", "content": q}],
-            thinking=args.think).unsqueeze(0).cuda()
+            thinking=args.think, system=args.system).unsqueeze(0).cuda()
         with torch.no_grad():
             gen = model.generate(ids, attention_mask=torch.ones_like(ids),
                                  max_new_tokens=max_new, do_sample=False,

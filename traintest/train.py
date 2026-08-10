@@ -83,14 +83,20 @@ def build_samples(tok, seq_len, only_think=False, system=None):
     if qa_dropped:
         print(f"qa: {qa_dropped} samples over seq_len, dropped", flush=True)
 
-    # Thinking-mode QA: constructed traces over ground truth. The chat
-    # template may or may not open the <think> block itself — detect once.
+    # Thinking-mode QA: constructed traces over ground truth — ONLY for
+    # models with a dedicated <think> token. For anything else the tags
+    # are plain text, and the model learns to spray "<think> Recalling
+    # the facts: ..." boilerplate into ordinary answers (observed on
+    # Ministral: adjacent-knowledge answers polluted with it).
+    has_think_token = len(tok("<think>", add_special_tokens=False).input_ids) == 1
+    if not has_think_token and not only_think:
+        print("think-qa: skipped (tokenizer has no <think> token)", flush=True)
     probe = tok.apply_chat_template(
         [{"role": "user", "content": "x"}], add_generation_prompt=True,
         enable_thinking=True, tokenize=False)
     open_tag = "" if probe.rstrip().endswith("<think>") else "<think>\n"
     dropped = 0
-    for q, trace, ans in facts.think_qa_pairs():
+    for q, trace, ans in (facts.think_qa_pairs() if has_think_token else []):
         s = chat_sample(q, f"{open_tag}{trace}\n</think>\n{ans}", True)
         if s is None:
             dropped += 1
@@ -107,8 +113,16 @@ def build_samples(tok, seq_len, only_think=False, system=None):
     # ~650 tokens (measured) and cannot fit seq_len — thinking style is
     # trained solely via the short constructed traces above.
     for fname, thinking in (("replay.json", False), ("replay_think.json", True)):
-        f = here / fname
-        if not f.exists():
+        # Local (model-specific, freshly generated) wins over the repo's
+        # data/ copy. Missing replay is loud: mistral1 trained without
+        # anchors because only the Windows staging dir had the file, and
+        # adjacent knowledge collapsed 87.5% -> 12.5%.
+        f = next((c for c in (here / fname, here.parent / "data" / fname)
+                  if c.exists()), None)
+        if f is None:
+            if fname == "replay.json":
+                print("replay: replay.json NOT FOUND — training unanchored, "
+                      "style/knowledge drift likely", flush=True)
             continue
         n = 0
         for r in json.loads(f.read_text(encoding="utf-8")):

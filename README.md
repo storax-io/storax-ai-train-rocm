@@ -55,10 +55,32 @@ SmolLM3-3B, full fine-tune, RX 7800 XT:
 
 Thinking mode (SmolLM3 hybrid reasoning): multihop questions improve
 62.5% → 87.5% with thinking; trace training caused zero no-think damage
-and raised paraphrase robustness +15 pts. Also running on
-**Ministral-3-3B** (multimodal Mistral 3, vision tower frozen) under
-Linux ROCm + transformers v5 — the exact software surface of the LUMI
-container.
+and raised paraphrase robustness +15 pts.
+
+**Ministral-3-3B** (multimodal Mistral 3, vision tower frozen), Linux
+ROCm + transformers v5 — the exact software surface of the LUMI
+container:
+
+| set | before | after (2 epochs, anchored) |
+|---|---|---|
+| trained facts | 43.7% | **92.2%** |
+| paraphrases | 41.0% | **97.4%** |
+| composition | 52.6% | **78.9%** |
+| adjacent knowledge | 87.5% | 62.5% (known limitation¹) |
+| control / retention | 0 · 9/10 | 0 · **10/10** |
+
+¹ Historical-content bleed (e.g. markka-era articles shifting currency
+beliefs) — diagnosed across four gated iterations (12.5% → 62.5% as
+missing replay anchors, cross-model replay, and think-format pollution
+were each identified and fixed). The candid failure ledger is the point:
+the gates catch damaged runs whose training metrics look perfect.
+
+**Compiler-verified evaluation** ([traintest/oracle_eval.py](traintest/oracle_eval.py)):
+generation → g++ oracle ([storax-gcc-oracle](https://github.com/storax-io/storax-gcc-oracle),
+GCC 16.1, C++26 reflection + contracts) → compile/run verdicts. No
+substring matching — the compiler is ground truth. Ministral baseline on
+the C++26 probe set ([data/cpp26_probes.jsonl](data/cpp26_probes.jsonl)):
+**1/10** — the "before" of the next campaign (C++26 capability training).
 
 Measured performance (same silicon, two stacks — the stack delta is why
 LUMI numbers are projected conservatively):
