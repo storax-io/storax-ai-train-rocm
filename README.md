@@ -27,10 +27,14 @@ GCC 16.1, C++26 reflection + contracts) → compile/run verdicts. The
 compiler is ground truth: the training corpus itself is oracle-verified
 (every exemplar must compile *and* run before it may teach), and the
 held-out probe suite is judged the same way. Ministral-3-3B:
-**1/10 → 7/10** compile+run after 8 minutes of training; remaining
-failures are single-error near-misses, driven toward 10/10 by dynamic
-training rounds ([tools/cpp26_loop.py](tools/cpp26_loop.py)) that add
-oracle-verified remedials per failing error class.
+**1/10 → 8/10** compile+run, stable under production repair semantics
+(`--repair`, up to 5 rounds). The corpus includes oracle-validated
+repair pairs (broken code + real compiler error + fix) teaching the
+compile-fix loop itself: the trained model corrects its own failed
+generations from compiler diagnostics, verified live in evaluation.
+Dynamic training rounds ([tools/cpp26_loop.py](tools/cpp26_loop.py)) add
+oracle-verified remedials per failing error class; the two residual
+probes are characterized capacity/corpus-scale limits at 3B.
 
 **3 — Multi-node mechanics** ([tests/smoke_dist.py](tests/smoke_dist.py)):
 `train.py` is torchrun-native — DDP, rank-strided sharding, `no_sync`
