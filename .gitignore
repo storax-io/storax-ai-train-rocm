@@ -222,3 +222,6 @@ __marimo__/
 .hf-cache*/
 runs-linux/
 traintest/replay*.json
+
+# internal/ never committed (deployment plans, application strategy)
+internal/
