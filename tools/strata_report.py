@@ -17,11 +17,14 @@ import re
 from pathlib import Path
 
 
-def normalize_error(stderr_head):
+def normalize_error(stderr_head, first_error=""):
     """First error line with file/line/col and identifiers scrubbed, so
     'parse_Currency' and 'parse_Biome' failures cluster together."""
     if (stderr_head or "").startswith("TRUNCATED-GENERATION"):
         return "TRUNCATED-GENERATION (raise --max-new)"
+    if first_error:
+        line = re.sub(r"^[^:]*:\d+:\d+:\s*", "", first_error)
+        return re.sub(r"'[^']*'", "'_'", line).strip()
     line = next((l for l in (stderr_head or "").splitlines()
                  if "error:" in l), "")
     line = re.sub(r"^[^:]*:\d+:\d+:\s*", "", line)
@@ -53,7 +56,8 @@ def main():
             if x.get("repair_rounds_used"):
                 fam_repaired[fam] += 1
         else:
-            clusters[normalize_error(x.get("stderr_head"))].append((x, t))
+            clusters[normalize_error(x.get("stderr_head"),
+                                     x.get("first_error", ""))].append((x, t))
 
     lines = [f"# Strata triage — {Path(args.eval_json).name}",
              "",

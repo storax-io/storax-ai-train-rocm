@@ -131,14 +131,20 @@ def main():
                       + (verdict.get("stderr") or verdict.get("error", ""))[:1200]
                       + "\nFix the program. Only output the corrected code."}]
         ok_count += ok
+        full_err = verdict.get("stderr") or ""
+        first_error = next((l for l in full_err.splitlines()
+                            if "error:" in l), "")
         results.append({"id": t["id"], "ok": ok,
                         "repair_rounds_used": rounds_used,
                         "truncated": truncated,
                         "rc": verdict.get("rc"),
                         "ms": verdict.get("ms"),
+                        # template cascades bury the error line beyond any
+                        # head-truncation — extract it before truncating
+                        "first_error": first_error[:300],
                         "stderr_head": ("TRUNCATED-GENERATION\n"
                                         if truncated and not ok else "")
-                                       + (verdict.get("stderr") or "")[:400],
+                                       + full_err[:400],
                         "code_head": code[:200]})
         tag = "PASS" if ok else "FAIL"
         if truncated and not ok:
