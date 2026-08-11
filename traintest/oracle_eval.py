@@ -27,12 +27,16 @@ def extract_code(text):
 
 @torch.no_grad()
 def generate(model, tok, msgs, system, max_new):
+    """Returns (text, truncated) — truncated means the generation hit the
+    token cap, so a compile failure would be an artifact, not a verdict."""
     ids = hfcompat.chat_prompt_ids(
         tok, msgs, thinking=False, system=system).unsqueeze(0).cuda()
     out = model.generate(ids, attention_mask=torch.ones_like(ids),
                          max_new_tokens=max_new, do_sample=False,
                          pad_token_id=tok.eos_token_id)
-    return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+    gen_len = out.shape[1] - ids.shape[1]
+    return (tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True),
+            gen_len >= max_new)
 
 
 def main():
@@ -42,7 +46,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--url", default=None, help="oracle URL(s), else ORACLE_URL")
     ap.add_argument("--system", default=None)
-    ap.add_argument("--max-new", type=int, default=700)
+    ap.add_argument("--max-new", type=int, default=1600)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--run", action="store_true", help="also execute a.out")
     ap.add_argument("--repair", type=int, default=0,
@@ -84,8 +88,10 @@ def main():
         rounds_used = 0
         verdict = {}
         code = ""
+        truncated = False
         for attempt in range(args.repair + 1):
-            gen = generate(model, tok, msgs, args.system, args.max_new)
+            gen, truncated = generate(model, tok, msgs, args.system,
+                                      args.max_new)
             code = extract_code(gen)
             try:
                 verdict = oracle.compile(code, run=args.run)
@@ -104,11 +110,16 @@ def main():
         ok_count += ok
         results.append({"id": t["id"], "ok": ok,
                         "repair_rounds_used": rounds_used,
+                        "truncated": truncated,
                         "rc": verdict.get("rc"),
                         "ms": verdict.get("ms"),
-                        "stderr_head": (verdict.get("stderr") or "")[:400],
+                        "stderr_head": ("TRUNCATED-GENERATION\n"
+                                        if truncated and not ok else "")
+                                       + (verdict.get("stderr") or "")[:400],
                         "code_head": code[:200]})
         tag = "PASS" if ok else "FAIL"
+        if truncated and not ok:
+            tag += " (truncated)"
         if ok and rounds_used:
             tag += f" (repair {rounds_used})"
         print(f"{tag}  {t['id']}", flush=True)

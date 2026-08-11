@@ -20,6 +20,8 @@ from pathlib import Path
 def normalize_error(stderr_head):
     """First error line with file/line/col and identifiers scrubbed, so
     'parse_Currency' and 'parse_Biome' failures cluster together."""
+    if (stderr_head or "").startswith("TRUNCATED-GENERATION"):
+        return "TRUNCATED-GENERATION (raise --max-new)"
     line = next((l for l in (stderr_head or "").splitlines()
                  if "error:" in l), "")
     line = re.sub(r"^[^:]*:\d+:\d+:\s*", "", line)
