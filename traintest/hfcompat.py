@@ -24,12 +24,20 @@ def load_causal_model(model_id, dtype, attn):
     which generate() text fine when given only input_ids."""
     from transformers import AutoModelForCausalLM
     try:
-        return AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             model_id, dtype=dtype, attn_implementation=attn)
     except Exception:
         from transformers import AutoModelForImageTextToText
-        return AutoModelForImageTextToText.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             model_id, dtype=dtype, attn_implementation=attn)
+    # Ministral ships max_length=262144 in generation_config; with our
+    # explicit max_new_tokens every generate() warns. max_new_tokens is
+    # always what we mean.
+    try:
+        model.generation_config.max_length = None
+    except Exception:
+        pass
+    return model
 
 
 def chat_prompt_ids(tok, msgs, thinking, add_generation_prompt=True,
