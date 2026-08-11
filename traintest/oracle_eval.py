@@ -52,6 +52,10 @@ def main():
     ap.add_argument("--max-new", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--run", action="store_true", help="also execute a.out")
+    ap.add_argument("--rerun-truncated", default=None, metavar="PREV_JSON",
+                    help="re-evaluate ONLY tasks that failed truncated in a "
+                         "previous result file (at the current --max-new) "
+                         "and merge verdicts into --out")
     ap.add_argument("--repair", type=int, default=0,
                     help="repair rounds: on compile failure, feed the "
                          "compiler error back and regenerate (matches the "
@@ -68,6 +72,22 @@ def main():
 
     tasks = [json.loads(l) for l in Path(args.suite).read_text().splitlines()
              if l.strip()]
+    prev = None
+    if args.rerun_truncated:
+        prev = json.loads(Path(args.rerun_truncated).read_text())
+        redo = {x["id"] for x in prev["results"]
+                if x.get("truncated") and not x["ok"]}
+        tasks = [t for t in tasks if t["id"] in redo]
+        print(f"rerun-truncated: {len(tasks)} task(s) from "
+              f"{args.rerun_truncated} at max_new={args.max_new}", flush=True)
+        if not tasks:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(json.dumps(prev, indent=2))
+            print("RESULT " + json.dumps({"compile_rate": prev["rate"],
+                                          "pass": prev["compile_pass"],
+                                          "total": prev["total"],
+                                          "rerun": 0}), flush=True)
+            return
     if args.limit:
         # Stratify across template families — suites are grouped, so a
         # head-slice samples a single family (measured: 24/24 same family,
@@ -127,10 +147,15 @@ def main():
             tag += f" (repair {rounds_used})"
         print(f"{tag}  {t['id']}", flush=True)
 
+    if prev is not None:
+        merged = {x["id"]: x for x in prev["results"]}
+        merged.update({x["id"]: x for x in results})
+        results = list(merged.values())
+        ok_count = sum(1 for x in results if x["ok"])
     report = {"model": args.model, "suite": args.suite, "run": args.run,
-              "repair": args.repair,
-              "compile_pass": ok_count, "total": len(tasks),
-              "rate": round(ok_count / max(1, len(tasks)), 3),
+              "repair": args.repair, "max_new": args.max_new,
+              "compile_pass": ok_count, "total": len(results),
+              "rate": round(ok_count / max(1, len(results)), 3),
               "results": results}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, indent=2))
