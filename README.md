@@ -44,10 +44,13 @@ probes are characterized capacity/corpus-scale limits at 3B.
 
 A companion dataset-generation pipeline (grammar-directed synthesis,
 oracle-verified admission, structurally held-out evals) feeds the
-harness at scale; its first integration cycle showed held-out transfer
-on unseen task families and closed a coverage-gap feedback loop —
-failure clusters triaged by [tools/strata_report.py](tools/strata_report.py)
-into upstream data fixes — within a day.
+harness at scale. A six-cycle generator↔trainer campaign against its
+held-out suite fixed four distinct failure classes — each cycle's
+failure clusters triaged by
+[tools/strata_report.py](tools/strata_report.py) into upstream data
+fixes that landed within a day and stayed fixed — reaching 46% on the
+suite with all guards green at 3B; the residual is measured
+variance/capacity, i.e. the scale case.
 
 **3 — Multi-node mechanics** ([tests/smoke_dist.py](tests/smoke_dist.py)):
 `train.py` is torchrun-native — DDP, rank-strided sharding, `no_sync`
