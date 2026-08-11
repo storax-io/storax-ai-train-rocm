@@ -46,7 +46,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--url", default=None, help="oracle URL(s), else ORACLE_URL")
     ap.add_argument("--system", default=None)
-    ap.add_argument("--max-new", type=int, default=1600)
+    # Cap only binds on runaway generations (EOS ends normal answers).
+    # 4096 covers STL-scale programs while bounding a local runaway at
+    # ~80s; on LUMI use --max-new 16000 (faster GPUs, thinking traces).
+    ap.add_argument("--max-new", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--run", action="store_true", help="also execute a.out")
     ap.add_argument("--repair", type=int, default=0,
