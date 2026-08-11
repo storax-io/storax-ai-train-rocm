@@ -35,6 +35,13 @@ SYNTH_QA_N = int(os.environ.get("CPP26DS_SYNTH_QA", "300"))
 MIX = tuple(int(x) for x in
             os.environ.get("CPP26DS_MIX", "70,20,10").split(","))
 
+# Drill share cap WITHIN the new-features QA pool. Drill volume growing
+# faster than composition streams regressed composition families and
+# guards twice (cycles 2 and 5) even with the macro mix held — the
+# internal ratio is load-bearing too. Excess drills are subsampled
+# deterministically; their mutations follow their bases.
+DRILL_SHARE = float(os.environ.get("CPP26DS_DRILL_SHARE", "0.45"))
+
 
 def _rows(name):
     f = _DIR / name
@@ -52,6 +59,19 @@ _SYNTH = sorted(_rows("synth.jsonl"), key=lambda r: r["id"])
 _TRACES = [r for r in _rows("filtered.jsonl") if r.get("source")]
 _EDITS = _rows("edits.jsonl")
 
+# Generator's mixture streams (2026-08-11): mixed = C++26 constructs in
+# ordinary C++23 shapes (counts as NEW: it teaches the constructs in
+# context); baseline = pure C++23; imported = verified STL/libcxx test
+# sources (baseline packing). synth-legacy is deliberately EXCLUDED from
+# positive training — it compiles but embodies pre-modern style; it
+# enters only once paired as modernize edit-triples.
+_MIXED = sorted(_rows("synth-mixed.jsonl"), key=lambda r: r["id"])
+_BASELINE = sorted(_rows("synth-baseline.jsonl"), key=lambda r: r["id"])
+_IMPORTED = sorted((r for r in _rows("imported.jsonl")
+                    if r.get("expected") == "ok"), key=lambda r: r["id"])
+_GUIDE = _rows("guidelines.jsonl")
+IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
+
 _rng = random.Random(SEED)
 _SYNTH_SHUF = _SYNTH[:]
 _rng.shuffle(_SYNTH_SHUF)
@@ -62,12 +82,23 @@ def _fenced(code):
 
 
 def article_texts():
-    """Synth-stream programs as raw LM text (packed by the trainer)."""
-    return [r["source"] for r in _SYNTH_SHUF[:SYNTH_TEXT_N]]
+    """Raw LM text (packed by the trainer): C++26 synth + mixed stream,
+    plus a capped sample of imported STL test sources as baseline."""
+    imp = _IMPORTED[:]
+    _rng2 = random.Random(SEED + 1)
+    _rng2.shuffle(imp)
+    return ([r["source"] for r in _SYNTH_SHUF[:SYNTH_TEXT_N]]
+            + [r["source"] for r in _MIXED]
+            + [r["source"] for r in imp[:IMPORTED_TEXT_N]])
 
 
 def training_texts():
-    return []
+    """Core-Guidelines rule statements (style policy in words)."""
+    out = []
+    for g in _GUIDE:
+        if g.get("prompt"):
+            out.append(g["prompt"])
+    return out * 2
 
 
 def _cpp_replay():
@@ -85,21 +116,58 @@ def _cpp_replay():
 
 def training_qa_pairs():
     out = []
-    # C++23 baseline pool, rebalanced to MIX[1]/MIX[0] of the C++26 QA
-    # mass (duplication is fine: anchors are few and oracle-verified).
-    new_mass = (len(_BASES) + len(_TRACES) + SYNTH_QA_N + len(_EDITS)
-                + len(_MUTS))
-    base_pool = _cpp_replay()
+    # Enforce DRILL_SHARE within the new pool: cap drill bases against
+    # non-drill new QA mass, round-robin per family (coverage preserved);
+    # mutations follow their kept bases.
+    other_new = len(_TRACES) + SYNTH_QA_N + len(_EDITS) + len(_MIXED)
+    bases = sorted(_BASES.values(), key=lambda r: r["id"])
+    max_bases = int(DRILL_SHARE / (1 - DRILL_SHARE) * max(other_new, 1))
+    if len(bases) > max_bases:
+        by_fam = {}
+        for r in bases:
+            by_fam.setdefault(r["family"], []).append(r)
+        picked = []
+        while len(picked) < max_bases and any(by_fam.values()):
+            for fam in sorted(by_fam):
+                if by_fam[fam] and len(picked) < max_bases:
+                    picked.append(by_fam[fam].pop(0))
+        print(f"drill cap: {len(bases)} -> {len(picked)} bases "
+              f"(share {DRILL_SHARE}); mutations follow", flush=True)
+        bases = picked
+    kept_ids = {r["id"] for r in bases}
+    muts = [m for m in _MUTS if m["base_id"] in kept_ids]
+
+    # C++23 baseline QA pool, rebalanced to MIX[1]/MIX[0] of the C++26
+    # QA mass: generator's synth-baseline stream + our model-native
+    # anchors (duplication only for any remaining shortfall).
+    new_mass = (len(bases) + len(_TRACES) + SYNTH_QA_N + len(_EDITS)
+                + len(muts) + len(_MIXED))
+    base_pool = ([(r["prompt"] + " Only output the code.",
+                   _fenced(r["source"])) for r in _BASELINE]
+                 + [(r["prompt"], _fenced(r["code"]))
+                    for r in _cpp_replay()])
     if base_pool:
         target = max(1, int(new_mass * MIX[1] / MIX[0]))
         reps = max(1, round(target / len(base_pool)))
         print(f"mix: c++26={new_mass} baseline_target={target} "
-              f"({len(base_pool)} anchors x{reps}); general share is "
+              f"({len(base_pool)} unique x{reps}); general share is "
               f"replay.json in train.py", flush=True)
         for _ in range(reps):
-            for r in base_pool:
-                out.append((r["prompt"], _fenced(r["code"])))
-    for r in _BASES.values():
+            out.extend(base_pool)
+
+    # Style-repair pairs from guidelines: bad code + clang-tidy findings
+    # -> conforming rewrite, same message shape as compile-repair.
+    for g in _GUIDE:
+        if g.get("bad") and g.get("source"):
+            findings = "\n".join(str(f) for f in
+                                 (g.get("bad_style_findings") or []))[:600]
+            out.append((
+                "This code violates the project style profile. "
+                "clang-tidy findings:\n" + findings
+                + "\nRewrite it to conform. Only output the corrected "
+                "code.\n\n```cpp\n" + g["bad"].strip() + "\n```",
+                _fenced(g["source"])))
+    for r in bases:
         out.append((r["prompt"] + " Only output the code.",
                     _fenced(r["source"])))
     for r in _TRACES:
@@ -113,7 +181,7 @@ def training_qa_pairs():
                     "\nOnly output the edited code.",
                     _fenced(r["edited"])))
     # Repair pairs in the exact message format oracle_eval --repair sends.
-    for r in _MUTS:
+    for r in muts:
         stderr = "\n".join(r.get("diagnostics") or [])[:800]
         fixed = _BASES[r["base_id"]]["source"]
         out.append((
