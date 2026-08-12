@@ -163,6 +163,8 @@ def main():
     # raise batch instead.
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--accum", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=0,
+                help="shuffle seed (multi-seed variance runs)")
     ap.add_argument("--seq-len", type=int, default=320)  # room for think traces
     ap.add_argument("--attn", default="sdpa",
                     choices=["sdpa", "eager", "flash_attention_2"])
@@ -276,7 +278,7 @@ def main():
         data_mod = facts
     samples = build_samples(tok, args.seq_len, only_think=args.only_think,
                             system=args.system, data=data_mod)
-    g = torch.Generator().manual_seed(facts.SEED)
+    g = torch.Generator().manual_seed(args.seed)
 
     # Constant 3e-5 to the last step tipped full5 into mode collapse
     # (unrelated questions answered with verbatim training sentences;
