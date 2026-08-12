@@ -194,6 +194,23 @@ def main():
     world = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     use_cuda = torch.cuda.is_available()
+
+    # NUMA affinity: pin this rank's threads to its GPU's closest cores.
+    # TRAINTEST_CORE_MAP="49-55,57-63,..." — one range per local rank,
+    # indexed by LOCAL_RANK (LUMI-G: each GCD has a 7-core L3 group;
+    # verify the mapping on-node with rocm-smi --showtoponuma first).
+    # Children (OpenMP, dataloader) inherit the affinity.
+    core_map = os.environ.get("TRAINTEST_CORE_MAP", "")
+    if core_map:
+        ranges = [r.strip() for r in core_map.split(",")]
+        if local_rank < len(ranges):
+            lo, _, hi = ranges[local_rank].partition("-")
+            cores = set(range(int(lo), int(hi or lo) + 1))
+            os.sched_setaffinity(0, cores)
+            os.environ.setdefault("OMP_NUM_THREADS", str(len(cores)))
+            if local_rank == 0:
+                print(f"affinity: rank0 -> cores {sorted(cores)} "
+                      f"(map has {len(ranges)} entries)", flush=True)
     if world > 1:
         dist.init_process_group(
             args.dist_backend or ("nccl" if use_cuda else "gloo"))
