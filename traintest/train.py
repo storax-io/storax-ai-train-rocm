@@ -15,6 +15,8 @@ import os
 import time
 from pathlib import Path
 
+import warnings
+
 import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -120,7 +122,10 @@ def build_samples(tok, seq_len, only_think=False, system=None, data=facts):
         # data/ copy. Missing replay is loud: mistral1 trained without
         # anchors because only the Windows staging dir had the file, and
         # adjacent knowledge collapsed 87.5% -> 12.5%.
-        f = next((c for c in (here / fname, here.parent / "data" / fname)
+        rdir = os.environ.get("TRAINTEST_REPLAY_DIR")
+        cands = ([Path(rdir) / fname] if rdir else []) + \
+                [here / fname, here.parent / "data" / fname]
+        f = next((c for c in cands
                   if c.exists()), None)
         if f is None:
             if fname == "replay.json":
@@ -279,6 +284,7 @@ def main():
     # run gently; 20-step warmup avoids the first-step shock.
     shard_len = len(samples) // world
     total_steps = args.max_steps or args.epochs * (shard_len // args.batch)
+    warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*optimizer.step.*")
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / 20, max(0.0, 1 - s / max(total_steps, 1))))
 

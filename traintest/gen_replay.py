@@ -8,6 +8,7 @@ Writes replay.json next to this script (the staging dir); the WSL side
 copies it back to the repo's data/ so later runs reuse it.
 """
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -159,7 +160,8 @@ def main():
         if (i + 1) % 10 == 0:
             print(f"{i + 1}/{len(topics)}", flush=True)
 
-    dest = Path(__file__).resolve().parent / (
+    dest = Path(os.environ.get("TRAINTEST_REPLAY_DIR",
+                            Path(__file__).resolve().parent)) / (
         "replay_think.json" if args.think else "replay.json")
     dest.write_text(json.dumps(out, ensure_ascii=False, indent=1),
                     encoding="utf-8")

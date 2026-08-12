@@ -10,6 +10,7 @@ Writes cpp_replay.json next to this script; cpp26dsdata picks it up.
 """
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -89,7 +90,8 @@ def main():
         if (i + 1) % 10 == 0:
             print(f"{i + 1}/{len(TASKS)} kept={len(kept)}", flush=True)
 
-    dest = Path(__file__).resolve().parent / "cpp_replay.json"
+    dest = Path(os.environ.get("TRAINTEST_REPLAY_DIR",
+                            Path(__file__).resolve().parent)) / "cpp_replay.json"
     dest.write_text(json.dumps(kept, indent=1), encoding="utf-8")
     print(f"wrote {dest}: {len(kept)} verified anchors, {rejected} rejected",
           flush=True)

@@ -106,7 +106,9 @@ def _cpp_replay():
     (gen_cpp_replay.py) — counterweight to feature-dense drills, which
     otherwise erode plain C++ (measured: struct-syntax failures and
     composition-family regressions in cycle 2)."""
-    f = Path(__file__).resolve().parent / "cpp_replay.json"
+    rdir = os.environ.get("TRAINTEST_REPLAY_DIR")
+    f = (Path(rdir) / "cpp_replay.json") if rdir else \
+        Path(__file__).resolve().parent / "cpp_replay.json"
     if not f.exists():
         print("cpp_replay.json missing — plain-C++ erosion likely "
               "(run gen_cpp_replay.py)", flush=True)
