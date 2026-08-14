@@ -62,7 +62,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--system", default=None)
-    ap.add_argument("--max-new", type=int, default=600)
+    ap.add_argument("--max-new", type=int, default=1200)  # 600 truncated
+    # every answer from the more verbose 14B (0/30 kept, LUMI job 21140120)
     args = ap.parse_args()
 
     oracle = Oracle()
@@ -80,13 +81,20 @@ def main():
             out = model.generate(ids, attention_mask=torch.ones_like(ids),
                                  max_new_tokens=args.max_new, do_sample=False,
                                  pad_token_id=tok.eos_token_id)
-        code = extract_code(
-            tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True))
+        gen_ids = out[0, ids.shape[1]:]
+        truncated = gen_ids[-1].item() != tok.eos_token_id
+        code = extract_code(tok.decode(gen_ids, skip_special_tokens=True))
         v = oracle.compile(code, run=True)
-        if v.get("ok") and v.get("run_rc") == 0:
+        if v.get("ok") and v.get("run_rc") == 0 and not truncated:
             kept.append({"prompt": prompt, "code": code})
         else:
             rejected += 1
+            # a reject must explain itself — 0/30 with silent discards
+            # cost a rerun to diagnose (LUMI job 21140120)
+            err = (v.get("stderr") or v.get("run_stderr") or "")
+            reason = ("TRUNCATED at max-new" if truncated else
+                      "; ".join(err.splitlines()[:2]) or f"rc={v.get('run_rc')}")
+            print(f"reject[{i}]: {reason}\n  head: {code[:120]!r}", flush=True)
         if (i + 1) % 10 == 0:
             print(f"{i + 1}/{len(TASKS)} kept={len(kept)}", flush=True)
 
