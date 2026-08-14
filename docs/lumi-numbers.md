@@ -116,3 +116,18 @@ at 14B. Reproducibility: two independent jobs on different nodes gave
 identical loss trajectories and 52.3/52.1% at batch 2. GCD->NUMA map
 (3,3,1,1,0,0,2,2) verified against rocm-smi on the full node; core
 pinning via TRAINTEST_CORE_MAP confirmed active.
+
+## Scaling ladder (2026-08-15, standard-g, production geometry)
+
+| nodes | GCDs | global tok/s | efficiency | per-GCD MFU |
+|---|---|---|---|---|
+| 1 | 8 | 4,454 | — | 59.4% |
+| 2 | 16 | 8,600 | 96.5% | 60.1% |
+| 4 | 32 | 16,825 | 94.4% | 60.0% |
+
+Per-GCD steady rate flat across widths (~1,020-1,030 tok/s); scaling cost
+confined to accumulation-boundary allreduce steps (4.0s -> 6.5s at 4
+nodes, amortized /8). Peak memory width-invariant (56.48 GiB). A 50M-token
+phase-B round on 4 nodes: ~50 min wall, ~26 GCD-h. One 2-node attempt
+died to a GPU Hang on a single sick node (nid007383) during weight upload
+— retry on excluded node passed; node-lottery, not workload.
