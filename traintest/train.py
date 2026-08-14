@@ -254,9 +254,12 @@ def main():
                   flush=True)
 
     if world > 1:
+        # gradient_as_bucket_view: param.grad points into the reducer's
+        # buckets instead of duplicating them — without it DDP holds a
+        # second full gradient copy (~24 GB at 14B, OOMed a 64 GB GCD)
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank] if use_cuda else None,
-            find_unused_parameters=False)
+            find_unused_parameters=False, gradient_as_bucket_view=True)
 
     if args.compile:
         model = torch.compile(model)
