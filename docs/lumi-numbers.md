@@ -94,3 +94,25 @@ multi-GPU, Slurm launch, real container throughput.
 - Constant-LR small-corpus FT collapses; linear decay to 0 required.
 - Optimizer lr semantics differ between implementations (torch vs
   transformers Adafactor) — verify loss actually moves before long runs.
+
+## Measured on LUMI-G (2026-08-14, MI250X, flight test 2)
+
+Ministral-3-14B full FT (embed/lm_head/vision frozen), bf16, Adafactor,
+gradient checkpointing, seq 512, 8 GCDs/node, manual grad allreduce at
+accumulation boundaries (DDP's reducer buckets + engine gradients need
+2x gradient memory and cannot fit a 14B on a 64 GB GCD):
+
+| batch/GCD | attn | steady tok/s/GCD | MFU (vs 191.5 TFLOPS/GCD) | peak GiB |
+|---|---|---|---|---|
+| 2 | sdpa | 898 | 52.3% | 50.7 |
+| 2 | FA2  | 894 | 52.1% | 50.7 |
+| 4 | FA2  | 1002 | 58.4% | 52.6 |
+| 8 | FA2  | 1037 | **60.4%** | 56.5 |
+
+Production geometry: batch 8 + flash-attention-2 (batch 4 fallback if
+long-run fragmentation erodes the 7.5 GiB margin). Node throughput
+~8,300 tok/s -> **1 Btok = ~33.5 node-hours = 268 GCD-h = 134 module-h**
+at 14B. Reproducibility: two independent jobs on different nodes gave
+identical loss trajectories and 52.3/52.1% at batch 2. GCD->NUMA map
+(3,3,1,1,0,0,2,2) verified against rocm-smi on the full node; core
+pinning via TRAINTEST_CORE_MAP confirmed active.
