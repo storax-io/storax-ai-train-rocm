@@ -341,10 +341,18 @@ def main():
             ctx = (model.no_sync()
                    if world > 1 and args.grad_sync == "ddp" and not will_sync
                    else contextlib.nullcontext())
-            with ctx:
-                loss = model(input_ids=input_ids, attention_mask=attn,
-                             labels=labels).loss
-                (loss / args.accum).backward()
+            try:
+                with ctx:
+                    loss = model(input_ids=input_ids, attention_mask=attn,
+                                 labels=labels).loss
+                    (loss / args.accum).backward()
+            except torch.OutOfMemoryError:
+                # the allocator table names where the bytes sit — worth more
+                # than the traceback on a machine we can't interactively probe
+                print(f"rank{rank} OOM at step {step + 1}; allocator state:\n"
+                      f"{torch.cuda.memory_summary(abbreviated=True)}",
+                      flush=True)
+                raise
             if will_sync and world > 1 and args.grad_sync == "manual":
                 # in-place allreduce on param.grad: zero extra memory,
                 # amortized over the accumulation window
