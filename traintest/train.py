@@ -328,6 +328,12 @@ def main():
     step_rates = []  # tok/s per step, for steady-state (warmup-free) stats
     t_start = time.perf_counter()
     stop = False
+    # scripted mid-run aborts (plan rule: aborts are scripted, never
+    # vigilance-dependent). Distinct exit codes so the retry launcher
+    # knows these are OUR outcomes, not node faults, and never retries.
+    from collections import deque
+    loss_window = deque(maxlen=20)
+    step_times, baseline_dt, slow_streak = [], None, 0
     for epoch in range(args.epochs):
         # same seed on every rank -> identical permutation; each rank
         # takes a disjoint stride so the union covers the epoch exactly.
@@ -397,6 +403,33 @@ def main():
             metrics_f.flush()
             if step % 10 == 0 and is_main:
                 print(json.dumps(rec), flush=True)
+            # ABORT-MEMORIZATION: sustained loss <=1e-3 before 70% of the
+            # schedule = deep memorization -> repair-deafness + guard
+            # breakage (phase-0 rule; anchors do not rescue it)
+            loss_window.append(loss.item())
+            if (total_steps and len(loss_window) == loss_window.maxlen
+                    and step < 0.7 * total_steps
+                    and sum(loss_window) / len(loss_window) < 1e-3):
+                print(f"ABORT-MEMORIZATION: mean loss "
+                      f"{sum(loss_window) / len(loss_window):.6f} over "
+                      f"{len(loss_window)} steps at {step}/{total_steps}",
+                      flush=True)
+                raise SystemExit(3)
+            # ABORT-SLOWDOWN: >3x steady-state step time sustained ~10
+            # steps = the DWM-class failure signature (paging, sick GPU)
+            step_times.append(dt)
+            if baseline_dt is None and step == 25:
+                mid = sorted(step_times[5:])
+                baseline_dt = mid[len(mid) // 2]
+            if baseline_dt is not None and dt > 3 * baseline_dt:
+                slow_streak += 1
+                if slow_streak >= 10:
+                    print(f"ABORT-SLOWDOWN: {dt:.2f}s/step vs baseline "
+                          f"{baseline_dt:.2f}s for {slow_streak} consecutive "
+                          f"steps", flush=True)
+                    raise SystemExit(4)
+            else:
+                slow_streak = 0
             if args.max_steps and step >= args.max_steps:
                 stop = True
                 break

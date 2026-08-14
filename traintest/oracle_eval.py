@@ -61,6 +61,9 @@ def main():
                          "compiler error back and regenerate (matches the "
                          "storax pipeline's max_repair_rounds semantics)")
     ap.add_argument("--attn", default="sdpa")
+    ap.add_argument("--shard", default="", metavar="I/M",
+                    help="evaluate tasks[i::m] only — run M instances (one "
+                         "per GCD) and merge with tools/merge_eval.py")
     args = ap.parse_args()
 
     oracle = Oracle(args.url) if args.url else Oracle()
@@ -102,6 +105,10 @@ def main():
                     picked.append(by_fam[fam].pop(0))
             i += 1
         tasks = picked
+    if args.shard:
+        i, m = (int(x) for x in args.shard.split("/"))
+        tasks = tasks[i::m]
+        print(f"shard {i}/{m}: {len(tasks)} tasks", flush=True)
 
     results = []
     ok_count = 0
