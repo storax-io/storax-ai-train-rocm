@@ -13,9 +13,31 @@ def load_tokenizer(model_id):
     and links the discussion). Older transformers reject the kwarg."""
     from transformers import AutoTokenizer
     try:
-        return AutoTokenizer.from_pretrained(model_id, fix_mistral_regex=True)
+        tok = AutoTokenizer.from_pretrained(model_id, fix_mistral_regex=True)
     except TypeError:
-        return AutoTokenizer.from_pretrained(model_id)
+        tok = AutoTokenizer.from_pretrained(model_id)
+    # Decode sanity gate: some transformers versions resolve tekken
+    # checkpoints to the slow LlamaTokenizer, whose decode emits raw
+    # byte-level symbols ("intĠmain()Ġ{Ċ..."). Encode is identical, so
+    # training is unaffected — but every generation consumer gets garbage
+    # (both LUMI replay runs, jobs 21140120/21141368). The checkpoint's
+    # tokenizer.json carries the proper ByteLevel decoder; ids verified
+    # identical to the slow path.
+    if "Ġ" in tok.decode(tok("a b", add_special_tokens=False).input_ids):
+        from transformers import PreTrainedTokenizerFast
+        from transformers.utils import cached_file
+        fast = PreTrainedTokenizerFast(
+            tokenizer_file=cached_file(model_id, "tokenizer.json"))
+        fast.chat_template = tok.chat_template
+        for attr in ("eos_token", "pad_token", "bos_token", "unk_token"):
+            val = getattr(tok, attr, None)
+            if val is not None:
+                setattr(fast, attr, val)
+        print("tokenizer: byte-level decode from slow fallback detected — "
+              "switched to the checkpoint's tokenizer.json fast backend",
+              flush=True)
+        tok = fast
+    return tok
 
 
 def load_causal_model(model_id, dtype, attn):
