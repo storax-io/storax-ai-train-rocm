@@ -368,6 +368,11 @@ def main():
             rec = {"step": step, "epoch": epoch, "loss": round(loss.item(), 4),
                    "step_s": round(dt, 3),
                    "tok_per_s": round(int(attn.sum().item()) / dt, 1)}
+            if use_cuda:
+                # allocated now vs peak-so-far: a growing 'mem' with flat
+                # 'peak' distinguishes a leak from a first-step transient
+                rec["mem_gib"] = round(torch.cuda.memory_allocated() / 2**30, 2)
+                rec["peak_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
             # MFU accounting uses computed positions: padded QA slots burn
             # the same FLOPs as real tokens even though loss ignores them.
             step_rates.append(input_ids.numel() / dt)
