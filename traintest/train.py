@@ -28,6 +28,8 @@ import hfcompat
 # kernels rarely exceed ~30-40% of it even on mature stacks.
 PEAK_BF16_TFLOPS = {
     "AMD Radeon RX 7800 XT": 74.65,
+    # per GCD (383 TFLOPS/module, 2 GCDs) — torch sees each GCD as a device
+    "AMD Instinct MI250X": 191.5,
 }
 
 
