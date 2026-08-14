@@ -229,6 +229,9 @@ def main():
         dist.init_process_group(
             args.dist_backend or ("nccl" if use_cuda else "gloo"))
     device = torch.device(f"cuda:{local_rank}" if use_cuda else "cpu")
+    if use_cuda:
+        torch.cuda.set_device(device)  # current-device APIs (allocator
+        # stats, context creation) must target this rank's GCD, not GPU 0
     is_main = rank == 0
 
     out = Path(args.out)
@@ -350,7 +353,7 @@ def main():
                 # the allocator table names where the bytes sit — worth more
                 # than the traceback on a machine we can't interactively probe
                 print(f"rank{rank} OOM at step {step + 1}; allocator state:\n"
-                      f"{torch.cuda.memory_summary(abbreviated=True)}",
+                      f"{torch.cuda.memory_summary(device=device, abbreviated=True)}",
                       flush=True)
                 raise
             if will_sync and world > 1 and args.grad_sync == "manual":
@@ -363,6 +366,10 @@ def main():
                 for w in works:
                     w.wait()
                 torch._foreach_mul_(grads, 1.0 / world)
+                # these locals otherwise persist to the NEXT boundary and
+                # pin all 22.5 GiB of freed grads through the following
+                # backward — double-grad OOM (LUMI job 21138910)
+                del grads, works
             if will_sync:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
