@@ -182,6 +182,13 @@ def main():
     ap.add_argument("--dist-backend", default="",
                     help="override process-group backend (default: nccl "
                          "with CUDA/ROCm, gloo on CPU)")
+    ap.add_argument("--grad-sync", default="manual",
+                    choices=["manual", "ddp"],
+                    help="manual: plain module + in-place grad allreduce at "
+                         "accumulation boundaries (no extra memory — DDP's "
+                         "reducer buckets + engine grads need 2x gradient "
+                         "memory and cannot fit 14B on a 64GB GCD); ddp: "
+                         "wrapper with overlapped comm, for models that fit")
     ap.add_argument("--data", default="facts",
                     choices=["facts", "cpp26", "cpp26ds"],
                     help="training data provider module")
@@ -253,10 +260,12 @@ def main():
             print(f"freeze: {frozen/1e9:.2f}B params frozen ({args.freeze})",
                   flush=True)
 
-    if world > 1:
-        # gradient_as_bucket_view: param.grad points into the reducer's
-        # buckets instead of duplicating them — without it DDP holds a
-        # second full gradient copy (~24 GB at 14B, OOMed a 64 GB GCD)
+    if world > 1 and args.grad_sync == "ddp":
+        # gradient_as_bucket_view halves steady-state grad memory, but the
+        # reducer's eager buckets + engine-allocated grads still peak at 2x
+        # gradient size (verified: single-rank probe backward-2 peak, and
+        # 14B OOM on 64GB GCDs in LUMI jobs 21136222/21136902) — use the
+        # default manual sync for anything that doesn't obviously fit.
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank] if use_cuda else None,
             find_unused_parameters=False, gradient_as_bucket_view=True)
@@ -327,12 +336,25 @@ def main():
             t0 = time.perf_counter()
             will_sync = (step + 1) % args.accum == 0
             # skip gradient allreduce on non-boundary accumulation steps
-            ctx = (model.no_sync() if world > 1 and not will_sync
+            # (no_sync exists only on the DDP wrapper; the manual path
+            # simply doesn't communicate until the boundary)
+            ctx = (model.no_sync()
+                   if world > 1 and args.grad_sync == "ddp" and not will_sync
                    else contextlib.nullcontext())
             with ctx:
                 loss = model(input_ids=input_ids, attention_mask=attn,
                              labels=labels).loss
                 (loss / args.accum).backward()
+            if will_sync and world > 1 and args.grad_sync == "manual":
+                # in-place allreduce on param.grad: zero extra memory,
+                # amortized over the accumulation window
+                grads = [p.grad for p in model.parameters()
+                         if p.grad is not None]
+                works = [torch.distributed.all_reduce(g, async_op=True)
+                         for g in grads]
+                for w in works:
+                    w.wait()
+                torch._foreach_mul_(grads, 1.0 / world)
             if will_sync:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
