@@ -11,7 +11,6 @@ stage: corpus admission, checkpoint evaluation, and retention guarding.
 ## The verified-data flywheel
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     subgraph GEN[Dataset generator]
         direction TB
@@ -95,7 +94,6 @@ never teacher-written (see the model-native replay rule above).
 Inside the 70, a second ratio matters as much as the macro mixture:
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     subgraph NEW[the 70% new-capability pool]
         D[level0 drills<br/>API-name anchoring,<br/>syntax cells<br/><b>share capped at 0.45</b>]
@@ -133,7 +131,6 @@ and generations move the priors only on multi-seed evidence.
 ## Training topology (LUMI-G, measured)
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart TB
     subgraph NODE1[node 1 of N — batch host]
         direction TB
@@ -177,7 +174,6 @@ GCD, 56.5/64 GiB peak — see [lumi-numbers.md](lumi-numbers.md).
 ## Evaluation and selection
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     CK[checkpoint] --> SH[8-way sharded eval<br/>one model instance per GCD<br/>batched generation]
     SH --> W0[wave: generate all<br/>open tasks]
