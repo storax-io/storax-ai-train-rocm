@@ -4,16 +4,21 @@
 AMD ROCm — the same code targets consumer Radeon GPUs and
 [LUMI](https://lumi-supercomputer.eu/) (MI250X).**
 
-In numbers: **34% MFU** sustained on consumer RDNA3 (math-SDPA floor),
-**96%** verified knowledge injection with all guards clean, **1/10 → 8/10**
-on compiler-judged held-out C++26 tasks including trained self-repair
-from compiler diagnostics, container API surface **16/16** against
-`lumi-multitorch-full`, multi-node DDP verified in simulation.
+In numbers, measured on LUMI-G (MI250X): **60.4% MFU** at 14B dense full
+fine-tune, **96.5% / 94.4%** multi-node scaling efficiency at 2/4 nodes,
+and one 50M-token round taking the base model from disbelief in C++26
+("still hypothetical") to **52% compile+run** on a 128-task
+compiler-judged reflection suite — with **92.6% retention** on the base
+model's own verified ordinary-C++ tasks. On the consumer hardware where
+it was de-risked: **34% MFU** on a single RDNA3 card, **96%** verified
+knowledge injection, **1/10 → 8/10** compiler-judged C++26 including
+trained self-repair from compiler diagnostics.
 
-Not a benchmark: this is the pipeline intended for LUMI, developed and
-de-risked end-to-end on a single Radeon RX 7800 XT (gfx1101, 16 GiB).
-One codebase runs on Windows-native ROCm, WSL2 Linux ROCm, and the LUMI
-AI Factory container (`lumi-multitorch-full`), gated by the same smoke
+The arc matters as much as the numbers: the pipeline was developed
+end-to-end on one Radeon RX 7800 XT (gfx1101, 16 GiB), then moved to
+LUMI where the first multi-GPU training round ran at 60% MFU. One
+codebase runs on Windows-native ROCm, WSL2 Linux ROCm, and the LUMI AI
+Factory container (`lumi-multitorch-full`), gated by the same smoke
 tests everywhere; environment differences are flags and env vars, not
 code forks.
 
@@ -56,12 +61,18 @@ fixes that landed within a day and stayed fixed — reaching 46% on the
 suite with all guards green at 3B; the residual is measured
 variance/capacity, i.e. the scale case.
 
-**3 — Multi-node mechanics** ([tests/smoke_dist.py](tests/smoke_dist.py)):
-`train.py` is torchrun-native — DDP, rank-strided sharding, `no_sync`
-accumulation, rank-0 artifacts, nccl/RCCL or gloo backend — verified by
-a simulated 2-rank run on the container-pinned stack (torch 2.10 +
-transformers v5). RCCL, fabric and Slurm remain first-hours-on-LUMI
-items.
+**3 — Multi-node mechanics, measured** — `train.py` is torchrun-native:
+rank-strided sharding, rank-0 artifacts, nccl/RCCL or gloo backend, and
+**manual gradient synchronization by default** (`--grad-sync manual`):
+an in-place all-reduce at accumulation boundaries. This is a measured
+necessity, not a preference — DDP's reducer buckets plus
+engine-materialized gradients peak at 2× gradient memory, and a 14B
+model cannot fit that on a 64 GB GCD at any batch size. The manual path
+costs zero extra memory and scales at **96.5% (2 nodes) / 94.4%
+(4 nodes)** efficiency on Slingshot with per-GCD throughput flat.
+Scripted mid-run aborts (memorization, step-time degradation) and a
+per-node GPU health probe with automatic bad-node exclusion make
+multi-hour campaigns unattended-safe.
 
 **4 — Measured hardware numbers** (RX 7800 XT, 74.65 TFLOPS peak bf16;
 3–3.85B models, bf16 + activation checkpointing, 8·N FLOPs/token):
@@ -81,21 +92,27 @@ silicon is why LUMI projections from these numbers
 consumer math-SDPA MFU already lands at the bottom of the 30–50% band
 published MI250X trainings achieve.
 
-## Running on LUMI
+## Measured on LUMI (MI250X, Ministral-3 14B, bf16 + checkpointing)
 
-- **Container**: API surface validated against `lumi-multitorch-full`
-  (torch 2.10 / ROCm 7.0.2 / transformers v5 / Python 3.12) —
-  [tests/smoke_lumi_compat.py](tests/smoke_lumi_compat.py), 16/16 PASS;
-  one v5 incompatibility caught and fixed before any LUMI hours
-  ([docs/lumi-compat-report.md](docs/lumi-compat-report.md)).
-- **Attention**: `--attn flash_attention_2` selects the container's
-  flash-attn 2 on gfx90a (consumer MFU was measured on math SDPA).
-- **Sizing**: GPU-hour tables at measured MFU, MI250X/MI300X projections,
-  Poro-34B sanity anchor: [docs/lumi-numbers.md](docs/lumi-numbers.md) ·
-  [tools/estimate.py](tools/estimate.py).
-- **First allocation hours**: `smoke_env.py` + `smoke_train.py --quick`
-  in-container, re-measure MFU with FA2, then scale the same `train.py`
-  via Slurm.
+| batch/GCD | attn | steady tok/s per GCD | MFU | peak GiB / 64 |
+|---|---|---|---|---|
+| 2 | sdpa / FA2 | 898 / 894 | 52.3 / 52.1% | 50.7 |
+| 4 | FA2 | 1,002 | 58.4% | 52.6 |
+| **8** | **FA2** | **1,037** | **60.4%** | 56.5 |
+
+Scaling: 96.5% at 2 nodes, 94.4% at 4 (production geometry, manual
+grad-sync amortized over the accumulation window). ~8,300 tok/s per
+node → **1 Btok ≈ 268 GCD-hours** at 14B. Full tables, the scaling
+ladder, and the findings each number was bought with:
+[docs/lumi-numbers.md](docs/lumi-numbers.md).
+
+Operational notes that transfer to any Slurm + singularity site: stage
+hot data to RAM-backed node `/tmp` and sync outputs once at job end;
+run evaluation sharded one model instance per GCD with batched
+generation (single-stream decode uses a few percent of a GCD); gate
+every job on a seconds-long per-GPU health probe — one sick node
+otherwise costs the whole allocation
+([tools/node_probe.py](tools/node_probe.py)).
 
 ## Quickstart (consumer ROCm)
 
@@ -156,6 +173,7 @@ docs/            architecture (diagrams), LUMI numbers, container compat report
 
 Models: [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B)
 (Apache-2.0), [Ministral-3-3B](https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512-BF16)
-(Apache-2.0). Dataset text crawled from Wikipedia (CC BY-SA). Code:
+and [Ministral-3-14B](https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512-BF16)
+(Apache-2.0; use the `-BF16` repos — the default variants are FP8). Dataset text crawled from Wikipedia (CC BY-SA). Code:
 Apache-2.0. Developed with AI assistance (Claude); the human author is
 responsible for the contents.
