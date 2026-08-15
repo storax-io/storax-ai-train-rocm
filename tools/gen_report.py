@@ -82,10 +82,17 @@ def main():
         print(f"  {fam:24} {n / n_rounds:5.1f}")
 
     if len(sys.argv) > 2:
-        ref = load_round(Path(sys.argv[2]))
-        if "error" not in ref:
-            print(f"\nbase reference: rate {ref['rate']:.3f} "
-                  f"({ref['pass']}/{ref['total']}), guard {ref['guard']:.3f}")
+        # reference dirs carry eval/ but no round.json — read eval directly
+        import json as _json
+        rd = Path(sys.argv[2])
+        try:
+            ev = _json.loads((rd / "eval" / "eval.json").read_text())
+            gd = _json.loads((rd / "eval" / "guard.json").read_text())
+            print(f"\nbase reference: rate {ev['rate']:.3f} "
+                  f"({ev['compile_pass']}/{ev['total']}), "
+                  f"guard {gd['rate']:.3f}")
+        except (FileNotFoundError, _json.JSONDecodeError) as e:
+            print(f"\nbase reference unavailable: {e!r}")
 
     best = ranked[0]
     print(f"\nBEST: {best[1]} mean {best[0]:.3f} over {len(best[3])} seeds"
