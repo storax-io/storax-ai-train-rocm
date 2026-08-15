@@ -50,11 +50,14 @@ class Oracle:
         return [{"url": u, **self._rpc(u, "/health")} for u in self.urls]
 
     def compile(self, files: dict[str, str] | str, *, run: bool = False,
+                link: bool | None = None,
                 args: list[str] | None = None, main: str | None = None,
                 timeout: float | None = None) -> dict:
         if isinstance(files, str):
             files = {"main.cpp": files}
         body: dict = {"files": files, "run": run}
+        if link is not None:
+            body["link"] = link
         if args:
             body["args"] = args
         if main:
