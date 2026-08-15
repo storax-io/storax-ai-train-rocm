@@ -244,6 +244,11 @@ def main():
         print(f"wave {attempt}: {sum(1 for s in states if s['ok'])}"
               f"/{len(states)} passing, {len(nxt)} to repair", flush=True)
         active = nxt
+        if model is not None:
+            # rambling checkpoints fragment the allocator across waves
+            # (c5-s3 OOMed in wave 3 at 36MB); repair prompts grow, so
+            # start each wave with a clean cache
+            torch.cuda.empty_cache()
 
     results = []
     ok_count = 0
