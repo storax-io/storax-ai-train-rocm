@@ -17,6 +17,10 @@ AI Factory container (`lumi-multitorch-full`), gated by the same smoke
 tests everywhere; environment differences are flags and env vars, not
 code forks.
 
+**How it all fits together** — the verified-data flywheel, the teacher's
+role, the measured LUMI topology, and the evaluation loop, with diagrams:
+[docs/architecture.md](docs/architecture.md).
+
 ## What it demonstrates
 
 **1 — Verified knowledge injection** (SmolLM3-3B, full bf16 fine-tune):
@@ -145,7 +149,7 @@ tools/           dataset builders (Wikipedia, oracle-verified C++26),
 tests/           smoke suites: env, train+verify, oracle, dist, LUMI compat
 scripts/         backend runners (run_linux.sh, run_win.sh)
 data/            datasets + replay anchors (regenerate with tools/)
-docs/            LUMI application numbers + container compat report
+docs/            architecture (diagrams), LUMI numbers, container compat report
 ```
 
 ## Requirements & licenses
