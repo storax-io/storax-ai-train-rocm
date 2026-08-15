@@ -39,6 +39,33 @@ def generate(model, tok, msgs, system, max_new):
             gen_len >= max_new)
 
 
+def generate_batch(model, tok, batch_msgs, system, max_new):
+    """Left-padded batched greedy generate — one forward pass serves the
+    whole wave instead of single-stream decodes (~5-10x per-GCD eval
+    throughput; single-stream uses a few percent of an MI250X GCD)."""
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    seqs = [hfcompat.chat_prompt_ids(tok, m, thinking=False, system=system)
+            for m in batch_msgs]
+    width = max(len(s) for s in seqs)
+    ids = torch.full((len(seqs), width), pad, dtype=torch.long)
+    attn = torch.zeros((len(seqs), width), dtype=torch.long)
+    for r, s in enumerate(seqs):
+        ids[r, width - len(s):] = s
+        attn[r, width - len(s):] = 1
+    ids, attn = ids.cuda(), attn.cuda()
+    out = model.generate(ids, attention_mask=attn, max_new_tokens=max_new,
+                         do_sample=False, pad_token_id=pad)
+    res = []
+    for r in range(len(seqs)):
+        gen_ids = out[r, width:]
+        text = tok.decode(gen_ids, skip_special_tokens=True)
+        # per-row truncation: a row that never emitted EOS ran to the cap
+        hit_cap = (len(gen_ids) >= max_new
+                   and tok.eos_token_id not in gen_ids.tolist())
+        res.append((text, hit_cap))
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -147,8 +174,8 @@ def main():
                      o.outputs[0].finish_reason == "length") for o in outs]
     else:
         def batch_generate(batch_msgs):
-            return [generate(model, tok, m, args.system, args.max_new)
-                    for m in batch_msgs]
+            return generate_batch(model, tok, batch_msgs, args.system,
+                                  args.max_new)
 
     states = [{"task": t, "msgs": [{"role": "user", "content": t["prompt"]}],
                "ok": False, "rounds_used": 0, "verdict": {}, "code": "",
