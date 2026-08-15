@@ -44,6 +44,25 @@ def generate_batch(model, tok, batch_msgs, system, max_new):
     whole wave instead of single-stream decodes (~5-10x per-GCD eval
     throughput; single-stream uses a few percent of an MI250X GCD)."""
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    try:
+        return _generate_batch_once(model, tok, batch_msgs, system, max_new,
+                                    pad)
+    except torch.OutOfMemoryError:
+        # 16 long-winded sequences fragment the growing KV cache (base-model
+        # eval OOMed at 53 GiB with 8-10 GiB reserved-unallocated). Rows are
+        # independent under left-padded greedy — split and retry.
+        if len(batch_msgs) == 1:
+            raise
+        torch.cuda.empty_cache()
+        mid = len(batch_msgs) // 2
+        print(f"generate_batch: OOM at batch {len(batch_msgs)} — splitting",
+              flush=True)
+        return (generate_batch(model, tok, batch_msgs[:mid], system, max_new)
+                + generate_batch(model, tok, batch_msgs[mid:], system,
+                                 max_new))
+
+
+def _generate_batch_once(model, tok, batch_msgs, system, max_new, pad):
     seqs = [hfcompat.chat_prompt_ids(tok, m, thinking=False, system=system)
             for m in batch_msgs]
     width = max(len(s) for s in seqs)
