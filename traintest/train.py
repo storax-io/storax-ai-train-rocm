@@ -480,6 +480,16 @@ def main():
         target = target.module if hasattr(target, "module") else target
         target.save_pretrained(out / "model", safe_serialization=True)
         tok.save_pretrained(out / "model")
+        # multimodal checkpoints must carry the processor configs or
+        # vLLM/AutoProcessor refuse to load them (LUMI job 21150500);
+        # Mistral repos ship no preprocessor_config.json, so the staged
+        # base dir carries a verified one — propagate whatever exists
+        import shutil
+        for fname in ("processor_config.json", "preprocessor_config.json",
+                      "chat_template.jinja", "params.json"):
+            src = Path(args.model) / fname
+            if src.exists():
+                shutil.copy2(src, out / "model" / fname)
         summary["model_dir"] = str(out / "model")
 
     if is_main:
