@@ -22,7 +22,14 @@ from oracle_client import Oracle
 
 def extract_code(text):
     m = re.search(r"```(?:cpp|c\+\+|C\+\+)?\s*\n(.*?)```", text, re.S)
-    return (m.group(1) if m else text).strip()
+    code = (m.group(1) if m else text).strip()
+    # degenerate fences reached the compiler as-is ~130 times across
+    # gen-1/2 ("stray '`'" cluster): unterminated opening fence, or a
+    # bare ``` line the regex above cannot pair — strip any remnants
+    if "```" in code:
+        lines = [l for l in code.splitlines() if not l.strip().startswith("```")]
+        code = "\n".join(lines).strip()
+    return code
 
 
 @torch.no_grad()
