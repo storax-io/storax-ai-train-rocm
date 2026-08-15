@@ -158,6 +158,10 @@ def main():
         if not active:
             break
         gens = batch_generate([s["msgs"] for s in active])
+        # a 0/N wave with universal truncation is indistinguishable from a
+        # broken prompt path without seeing output — always show one head
+        print(f"wave {attempt} sample [{active[0]['task']['id']}] "
+              f"truncated={gens[0][1]} head: {gens[0][0][:200]!r}", flush=True)
         nxt = []
         for s, (gen, truncated) in zip(active, gens):
             s["truncated"] = truncated
