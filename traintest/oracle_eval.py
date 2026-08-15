@@ -219,6 +219,12 @@ def main():
             s["ok"] = bool(s["verdict"].get("ok")) and (
                 not args.run or s["verdict"].get("run_rc") == 0)
             s["rounds_used"] = attempt
+            if s["truncated"] and not s["ok"]:
+                # a ceiling-hit runaway is not a compile error — repairing
+                # 4k of noise never compiles and each wave re-runs the
+                # whole pathology (degenerate checkpoints took 3x eval
+                # wall); the truncated flag already marks the verdict
+                continue
             if not s["ok"] and attempt < args.repair:
                 s["msgs"] += [{"role": "assistant", "content": gen},
                               {"role": "user", "content":

@@ -27,6 +27,8 @@ def load_round(d):
             "pass": ev["compile_pass"], "total": ev["total"],
             "guard": gd["rate"], "guard_ok": gd["rate"] >= 0.9,
             "fails": [r["id"] for r in ev["results"] if not r["ok"]],
+            "truncated": sum(1 for r in ev["results"]
+                             if r.get("truncated") and not r["ok"]),
             "repairs": sum(r.get("repair_rounds_used", 0)
                            for r in ev["results"] if r["ok"])}
 
@@ -58,14 +60,15 @@ def main():
         mean = statistics.mean(rates)
         sd = statistics.stdev(rates) if len(rates) > 1 else 0.0
         guard_fail = any(not r["guard_ok"] for r in rs)
-        verdict = "GUARD-FAIL" if guard_fail else ""
+        trunc = sum(r.get("truncated", 0) for r in rs)
         ranked.append((mean, cfg, rs[0], rates, sd, min(guards),
-                       guard_fail))
+                       guard_fail, trunc))
     ranked.sort(reverse=True)
-    for mean, cfg, r0, rates, sd, gmin, gfail in ranked:
+    for mean, cfg, r0, rates, sd, gmin, gfail, trunc in ranked:
+        note = "GUARD-FAIL" if gfail else ("DEGENERATE" if trunc > 20 else "ok")
         print(f"{cfg:8} {r0['mix']:10} {r0['drill']:<5} {len(rates):<2} "
               f"{mean:.3f}  {min(rates):.3f}-{max(rates):.3f} "
-              f"{sd:.3f} {gmin:9.3f} {'GUARD-FAIL' if gfail else 'ok'}")
+              f"{sd:.3f} {gmin:9.3f} {note}  trunc={trunc}")
 
     fails = {}
     for r in ok:
