@@ -11,6 +11,7 @@ stage: corpus admission, checkpoint evaluation, and retention guarding.
 ## The verified-data flywheel
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     subgraph GEN[Dataset generator]
         direction TB
@@ -75,6 +76,7 @@ own failed generations from compiler output at inference time.
 ## The mixture: 70/20/10 and the rules inside it
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"pie1":"#7da7d9","pie2":"#a3c9a8","pie3":"#e8c07d","pieTitleTextColor":"#8895a3","pieLegendTextColor":"#8895a3","pieSectionTextColor":"#1a2733","pieOpacity":"0.85"}}}%%
 pie showData title Training mixture (per round)
     "new capability (C++26)" : 70
     "current-standard C++ (C++23 baseline)" : 20
@@ -93,6 +95,7 @@ never teacher-written (see the model-native replay rule above).
 Inside the 70, a second ratio matters as much as the macro mixture:
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     subgraph NEW[the 70% new-capability pool]
         D[level0 drills<br/>API-name anchoring,<br/>syntax cells<br/><b>share capped at 0.45</b>]
@@ -130,6 +133,7 @@ and generations move the priors only on multi-seed evidence.
 ## Training topology (LUMI-G, measured)
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart TB
     subgraph NODE1[node 1 of N — batch host]
         direction TB
@@ -173,6 +177,7 @@ GCD, 56.5/64 GiB peak — see [lumi-numbers.md](lumi-numbers.md).
 ## Evaluation and selection
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#dbe7f5","primaryTextColor":"#1a2733","primaryBorderColor":"#7d96ad","secondaryColor":"#efe6d8","tertiaryColor":"#e4efdc","lineColor":"#8899aa","textColor":"#8895a3","clusterBkg":"#eef1f5","clusterBorder":"#9fb0c0","edgeLabelBackground":"#dbe7f5"}}}%%
 flowchart LR
     CK[checkpoint] --> SH[8-way sharded eval<br/>one model instance per GCD<br/>batched generation]
     SH --> W0[wave: generate all<br/>open tasks]
