@@ -124,7 +124,12 @@ def main():
     # shard through continuous batching instead of single-stream decode.
     if args.backend == "vllm":
         from vllm import LLM, SamplingParams, TokensPrompt
-        llm = LLM(model=args.model, dtype="bfloat16", enforce_eager=False)
+        # max_model_len: the checkpoint advertises 262k context, for which
+        # vLLM would reserve a 40GiB KV cache that does not fit beside the
+        # weights (LUMI job 21151918). Worst real conversation here is
+        # prompt + repair rounds carrying 16k generations ~= 35k tokens.
+        llm = LLM(model=args.model, dtype="bfloat16", enforce_eager=False,
+                  max_model_len=65536)
 
         def batch_generate(batch_msgs):
             prompts = [TokensPrompt(prompt_token_ids=hfcompat.chat_prompt_ids(
