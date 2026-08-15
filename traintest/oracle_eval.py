@@ -210,7 +210,14 @@ def main():
     for attempt in range(args.repair + 1):
         if not active:
             break
-        gens = batch_generate([s["msgs"] for s in active])
+        try:
+            gens = batch_generate([s["msgs"] for s in active])
+        except torch.OutOfMemoryError:
+            # terminal by definition (already split to batch 1) — exit NOW,
+            # burn nothing more; the sweep re-queues this eval
+            print("EVAL-OOM-FATAL: single-sequence OOM — aborting eval",
+                  flush=True)
+            raise SystemExit(5)
         # a 0/N wave with universal truncation is indistinguishable from a
         # broken prompt path without seeing output — always show one head
         print(f"wave {attempt} sample [{active[0]['task']['id']}] "
