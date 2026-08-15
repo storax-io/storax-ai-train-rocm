@@ -72,6 +72,61 @@ half must pass the oracle — the teacher supplies the fix, the compiler
 decides whether it counts. This is what teaches the model to correct its
 own failed generations from compiler output at inference time.
 
+## The mixture: 70/20/10 and the rules inside it
+
+```mermaid
+pie showData title Training mixture (per round)
+    "new capability (C++26)" : 70
+    "current-standard C++ (C++23 baseline)" : 20
+    "general-language replay (model-native)" : 10
+```
+
+**70% new / 20% baseline / 30% total anchoring.** The 70 teaches the
+capability; the 20 keeps ordinary modern C++ competence from eroding
+under feature-dense data; the 10 keeps chat style and world knowledge
+from drifting toward the domain corpus. The two anchor bands come from
+different sources on purpose: the C++23 baseline is generator-produced
+and oracle-verified, while the general replay is produced by **the model
+being trained** at round setup — never stored as a dataset artifact,
+never teacher-written (see the model-native replay rule above).
+
+Inside the 70, a second ratio matters as much as the macro mixture:
+
+```mermaid
+flowchart LR
+    subgraph NEW[the 70% new-capability pool]
+        D[level0 drills<br/>API-name anchoring,<br/>syntax cells<br/><b>share capped at 0.45</b>]
+        S[synth + mixed compositions<br/>features used together,<br/>in context]
+        RP[repair pairs<br/>broken + diagnostic + fix]
+    end
+    D -. "drills up without<br/>compositions up<br/>= regression" .- S
+```
+
+**Drill share is capped (0.45)** because it was twice observed that
+growing drill volume without growing composition volume *regresses*
+composed usage and guard behavior — the model gets better at isolated
+syntax and worse at using features together. Pass rates track per-cell
+drill coverage, but only when the composition stream grows in step.
+
+Rules that ride along with the mixture, each bought with a failed run:
+
+- **Warmup + linear LR decay to zero.** Constant LR on a small corpus
+  mode-collapses: unrelated questions answered with verbatim training
+  sentences. The collapse tracks the LR trajectory, not the final loss.
+- **Sustained loss ≤ 1e-3 = reject the run** (scripted abort). That deep
+  in memorization the model goes repair-deaf and breaks guards; anchor
+  data does not rescue it.
+- **≥3 seeds per configuration.** Identical recipes vary by σ≈5 points
+  on the eval suite; drilled families are seed-robust while
+  capacity-limited families are a seed lottery. Single-seed comparisons
+  are noise; best-of-N seeds is cheap capability.
+- **Fresh-from-base rounds** for attribution — continue-training only
+  inside an already-selected lineage.
+
+These knobs — mixture ratios, drill share, seed — are exactly the axes
+the population search sweeps: every training round records its values,
+and generations move the priors only on multi-seed evidence.
+
 ## Training topology (LUMI-G, measured)
 
 ```mermaid
