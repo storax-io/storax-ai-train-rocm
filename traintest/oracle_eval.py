@@ -61,6 +61,10 @@ def main():
                          "compiler error back and regenerate (matches the "
                          "storax pipeline's max_repair_rounds semantics)")
     ap.add_argument("--attn", default="sdpa")
+    ap.add_argument("--backend", default="hf", choices=["hf", "vllm"],
+                    help="vllm: continuous-batched generation (whole shard "
+                         "in flight) — ~10x eval throughput; hf: sequential "
+                         "transformers generate (reference semantics)")
     ap.add_argument("--shard", default="", metavar="I/M",
                     help="evaluate tasks[i::m] only — run M instances (one "
                          "per GCD) and merge with tools/merge_eval.py")
@@ -70,8 +74,11 @@ def main():
     print("oracle:", json.dumps(oracle.health()), flush=True)
 
     tok = hfcompat.load_tokenizer(args.model)
-    model = hfcompat.load_causal_model(args.model, torch.bfloat16, args.attn)
-    model.cuda().eval()
+    model = None
+    if args.backend == "hf":
+        model = hfcompat.load_causal_model(args.model, torch.bfloat16,
+                                           args.attn)
+        model.cuda().eval()
 
     tasks = [json.loads(l) for l in Path(args.suite).read_text().splitlines()
              if l.strip()]
@@ -110,54 +117,91 @@ def main():
         tasks = tasks[i::m]
         print(f"shard {i}/{m}: {len(tasks)} tasks", flush=True)
 
+    # Wave-based evaluation: generate for every unresolved task, verify
+    # against the oracle, and carry failures (with compiler feedback
+    # appended) into the next wave. Repair semantics identical to the old
+    # per-task loop; waves are what let the vllm backend batch an entire
+    # shard through continuous batching instead of single-stream decode.
+    if args.backend == "vllm":
+        from vllm import LLM, SamplingParams, TokensPrompt
+        llm = LLM(model=args.model, dtype="bfloat16", enforce_eager=False)
+
+        def batch_generate(batch_msgs):
+            prompts = [TokensPrompt(prompt_token_ids=hfcompat.chat_prompt_ids(
+                tok, m, thinking=False, system=args.system).tolist())
+                for m in batch_msgs]
+            # detokenize=False: the container's HF tokenizer garbles
+            # byte-level decode (see hfcompat.load_tokenizer) — decode
+            # returned ids with our sanity-gated tokenizer instead
+            sp = SamplingParams(temperature=0, max_tokens=args.max_new,
+                                stop_token_ids=[tok.eos_token_id],
+                                detokenize=False)
+            outs = llm.generate(prompts, sp)
+            return [(tok.decode(list(o.outputs[0].token_ids),
+                                skip_special_tokens=True),
+                     o.outputs[0].finish_reason == "length") for o in outs]
+    else:
+        def batch_generate(batch_msgs):
+            return [generate(model, tok, m, args.system, args.max_new)
+                    for m in batch_msgs]
+
+    states = [{"task": t, "msgs": [{"role": "user", "content": t["prompt"]}],
+               "ok": False, "rounds_used": 0, "verdict": {}, "code": "",
+               "truncated": False} for t in tasks]
+    active = states
+    for attempt in range(args.repair + 1):
+        if not active:
+            break
+        gens = batch_generate([s["msgs"] for s in active])
+        nxt = []
+        for s, (gen, truncated) in zip(active, gens):
+            s["truncated"] = truncated
+            s["code"] = extract_code(gen)
+            try:
+                s["verdict"] = oracle.compile(s["code"], run=args.run)
+            except Exception as e:  # noqa: BLE001 — oracle/network failure
+                s["verdict"] = {"ok": False, "error": repr(e)}
+            s["ok"] = bool(s["verdict"].get("ok")) and (
+                not args.run or s["verdict"].get("run_rc") == 0)
+            s["rounds_used"] = attempt
+            if not s["ok"] and attempt < args.repair:
+                s["msgs"] += [{"role": "assistant", "content": gen},
+                              {"role": "user", "content":
+                               "That does not compile. Compiler output:\n"
+                               + (s["verdict"].get("stderr")
+                                  or s["verdict"].get("error", ""))[:1200]
+                               + "\nFix the program. Only output the "
+                                 "corrected code."}]
+                nxt.append(s)
+        print(f"wave {attempt}: {sum(1 for s in states if s['ok'])}"
+              f"/{len(states)} passing, {len(nxt)} to repair", flush=True)
+        active = nxt
+
     results = []
     ok_count = 0
-    for t in tasks:
-        msgs = [{"role": "user", "content": t["prompt"]}]
-        ok = False
-        rounds_used = 0
-        verdict = {}
-        code = ""
-        truncated = False
-        for attempt in range(args.repair + 1):
-            gen, truncated = generate(model, tok, msgs, args.system,
-                                      args.max_new)
-            code = extract_code(gen)
-            try:
-                verdict = oracle.compile(code, run=args.run)
-            except Exception as e:  # noqa: BLE001 — oracle/network failure
-                verdict = {"ok": False, "error": repr(e)}
-            ok = bool(verdict.get("ok")) and (not args.run
-                                              or verdict.get("run_rc") == 0)
-            rounds_used = attempt
-            if ok or attempt == args.repair:
-                break
-            msgs += [{"role": "assistant", "content": gen},
-                     {"role": "user", "content":
-                      "That does not compile. Compiler output:\n"
-                      + (verdict.get("stderr") or verdict.get("error", ""))[:1200]
-                      + "\nFix the program. Only output the corrected code."}]
+    for s in states:
+        t, verdict, ok = s["task"], s["verdict"], s["ok"]
         ok_count += ok
         full_err = verdict.get("stderr") or ""
         first_error = next((l for l in full_err.splitlines()
                             if "error:" in l), "")
         results.append({"id": t["id"], "ok": ok,
-                        "repair_rounds_used": rounds_used,
-                        "truncated": truncated,
+                        "repair_rounds_used": s["rounds_used"],
+                        "truncated": s["truncated"],
                         "rc": verdict.get("rc"),
                         "ms": verdict.get("ms"),
                         # template cascades bury the error line beyond any
                         # head-truncation — extract it before truncating
                         "first_error": first_error[:300],
                         "stderr_head": ("TRUNCATED-GENERATION\n"
-                                        if truncated and not ok else "")
+                                        if s["truncated"] and not ok else "")
                                        + full_err[:400],
-                        "code_head": code[:200]})
+                        "code_head": s["code"][:200]})
         tag = "PASS" if ok else "FAIL"
-        if truncated and not ok:
+        if s["truncated"] and not ok:
             tag += " (truncated)"
-        if ok and rounds_used:
-            tag += f" (repair {rounds_used})"
+        if ok and s["rounds_used"]:
+            tag += f" (repair {s['rounds_used']})"
         print(f"{tag}  {t['id']}", flush=True)
 
     if prev is not None:
