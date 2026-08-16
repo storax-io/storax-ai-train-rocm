@@ -243,6 +243,7 @@ def main():
                "ok": False, "rounds_used": 0, "verdict": {}, "code": "",
                "truncated": False} for t in tasks]
     active = states
+    degenerate_floor = None
     for attempt in range(args.repair + 1):
         if not active:
             break
@@ -287,6 +288,22 @@ def main():
         print(f"wave {attempt}: {sum(1 for s in states if s['ok'])}"
               f"/{len(states)} passing, {len(nxt)} to repair", flush=True)
         active = nxt
+        # DEGENERATE floor (Henri: repair waves on an already-failed config
+        # are useless GPU waste). Wave 0 over the full task set IS the
+        # complete first-shot measurement; below the floor the config
+        # verdict is already decided and repair adds wall-time, not
+        # information. Recorded in the result as an explicit rule, not a
+        # salvage partial.
+        floor = float(os.environ.get("EVAL_ABORT_BELOW", "0"))
+        if attempt == 0 and floor > 0 and states:
+            w0 = sum(1 for s in states if s["ok"]) / len(states)
+            if w0 < floor:
+                print(f"wave 0 rate {w0:.3f} < floor {floor} — DEGENERATE, "
+                      f"repair waves skipped ({len(nxt)} tasks stay failed)",
+                      flush=True)
+                degenerate_floor = {"wave0_rate": round(w0, 4),
+                                    "floor": floor, "repair_skipped": True}
+                active = []
         if model is not None:
             # rambling checkpoints fragment the allocator across waves
             # (c5-s3 OOMed in wave 3 at 36MB); repair prompts grow, so
@@ -330,6 +347,8 @@ def main():
               "compile_pass": ok_count, "total": len(results),
               "rate": round(ok_count / max(1, len(results)), 3),
               "results": results}
+    if degenerate_floor:
+        report["degenerate"] = degenerate_floor
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, indent=2))
     print("RESULT " + json.dumps({"compile_rate": report["rate"],
