@@ -11,6 +11,7 @@ Suite format: JSONL with {id, prompt}; generation is greedy; the first
 """
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -46,10 +47,40 @@ def generate(model, tok, msgs, system, max_new):
             gen_len >= max_new)
 
 
+def _free_cuda(model):
+    """Actually release generation caches: transformers keeps cache objects
+    alive (model-attached cache, DynamicCache reference cycles), so
+    completed sub-batches accumulate — measured 62.21 GiB allocated at
+    batch 1 on a lone slot (gen-3 diagnostic, 2026-08-16). gc first, then
+    empty_cache, and drop any cache the model itself retains."""
+    import gc
+    for attr in ("_cache", "cache"):
+        if hasattr(model, attr):
+            try:
+                setattr(model, attr, None)
+            except Exception:
+                pass
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+EVAL_BATCH_MAX = int(os.environ.get("EVAL_BATCH_MAX", "32"))
+
+
 def generate_batch(model, tok, batch_msgs, system, max_new):
     """Left-padded batched greedy generate — one forward pass serves the
     whole wave instead of single-stream decodes (~5-10x per-GCD eval
-    throughput; single-stream uses a few percent of an MI250X GCD)."""
+    throughput; single-stream uses a few percent of an MI250X GCD).
+    Waves wider than EVAL_BATCH_MAX are chunked up front: peak KV scales
+    with batch x generated-length, and verbose checkpoints at batch 128
+    exceed a 64 GiB GCD before the first split can react."""
+    if len(batch_msgs) > EVAL_BATCH_MAX:
+        out = []
+        for i in range(0, len(batch_msgs), EVAL_BATCH_MAX):
+            out += generate_batch(model, tok, batch_msgs[i:i + EVAL_BATCH_MAX],
+                                  system, max_new)
+            _free_cuda(model)
+        return out
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     try:
         return _generate_batch_once(model, tok, batch_msgs, system, max_new,
@@ -65,7 +96,7 @@ def generate_batch(model, tok, batch_msgs, system, max_new):
                   flush=True)
             print(torch.cuda.memory_summary(abbreviated=True), flush=True)
             raise
-        torch.cuda.empty_cache()
+        _free_cuda(model)
         mid = len(batch_msgs) // 2
         print(f"generate_batch: OOM at batch {len(batch_msgs)} — splitting"
               f" ({str(e).splitlines()[0][:120]})", flush=True)
