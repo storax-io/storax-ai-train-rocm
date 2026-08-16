@@ -334,6 +334,7 @@ def main():
         results.append({"id": t["id"], "ok": ok,
                         "repair_rounds_used": s["rounds_used"],
                         "truncated": s["truncated"],
+                        "gen_tokens": s.get("gen_tokens", 0),
                         "rc": verdict.get("rc"),
                         "ms": verdict.get("ms"),
                         # template cascades bury the error line beyond any
