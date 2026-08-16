@@ -120,11 +120,15 @@ def _generate_batch_once(model, tok, batch_msgs, system, max_new, pad):
     res = []
     for r in range(len(seqs)):
         gen_ids = out[r, width:]
+        ids_list = gen_ids.tolist()
+        # true answer length: up to and including EOS if emitted
+        n_tok = (ids_list.index(tok.eos_token_id) + 1
+                 if tok.eos_token_id in ids_list else len(ids_list))
         text = tok.decode(gen_ids, skip_special_tokens=True)
         # per-row truncation: a row that never emitted EOS ran to the cap
         hit_cap = (len(gen_ids) >= max_new
-                   and tok.eos_token_id not in gen_ids.tolist())
-        res.append((text, hit_cap))
+                   and tok.eos_token_id not in ids_list)
+        res.append((text, hit_cap, n_tok))
     return res
 
 
@@ -233,7 +237,8 @@ def main():
             outs = llm.generate(prompts, sp)
             return [(tok.decode(list(o.outputs[0].token_ids),
                                 skip_special_tokens=True),
-                     o.outputs[0].finish_reason == "length") for o in outs]
+                     o.outputs[0].finish_reason == "length",
+                     len(o.outputs[0].token_ids)) for o in outs]
     else:
         def batch_generate(batch_msgs):
             return generate_batch(model, tok, batch_msgs, args.system,
@@ -244,9 +249,11 @@ def main():
                "truncated": False} for t in tasks]
     active = states
     degenerate_floor = None
+    import time as _time
     for attempt in range(args.repair + 1):
         if not active:
             break
+        _t0 = _time.monotonic()
         try:
             gens = batch_generate([s["msgs"] for s in active])
         except torch.OutOfMemoryError:
@@ -258,10 +265,12 @@ def main():
         # a 0/N wave with universal truncation is indistinguishable from a
         # broken prompt path without seeing output — always show one head
         print(f"wave {attempt} sample [{active[0]['task']['id']}] "
-              f"truncated={gens[0][1]} head: {gens[0][0][:200]!r}", flush=True)
+              f"truncated={gens[0][1]} tokens={gens[0][2]} "
+              f"head: {gens[0][0][:200]!r}", flush=True)
         nxt = []
-        for s, (gen, truncated) in zip(active, gens):
+        for s, (gen, truncated, n_tok) in zip(active, gens):
             s["truncated"] = truncated
+            s["gen_tokens"] = s.get("gen_tokens", 0) + n_tok
             s["code"] = extract_code(gen)
             try:
                 s["verdict"] = oracle.compile(s["code"], run=args.run)
@@ -285,8 +294,12 @@ def main():
                                + "\nFix the program. Only output the "
                                  "corrected code."}]
                 nxt.append(s)
+        _dt = _time.monotonic() - _t0
+        _toks = sum(g[2] for g in gens)
         print(f"wave {attempt}: {sum(1 for s in states if s['ok'])}"
-              f"/{len(states)} passing, {len(nxt)} to repair", flush=True)
+              f"/{len(states)} passing, {len(nxt)} to repair"
+              f" | {_dt:.0f}s, {_toks} tok, {_toks / max(_dt, 1):.0f} tok/s",
+              flush=True)
         active = nxt
         # DEGENERATE floor (Henri: repair waves on an already-failed config
         # are useless GPU waste). Wave 0 over the full task set IS the
