@@ -20,39 +20,24 @@ def family(task_id):
 
 
 def load_run(d):
-    partial = False
+    # complete measurements only — a run without full eval + guard is a
+    # GAP to re-run, never a partial to fold in ("we don't make stuff
+    # weaker by adding statistics" — Henri)
     try:
         ev = json.loads((d / "eval" / "eval.json").read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        # salvage fallback: merge whatever shards survived (checkpoint may
-        # be pruned — this partial is all this run will ever say)
-        shards = sorted((d / "eval-salvage").glob("shard*.json"))
-        if not shards:
-            return None
-        merged = {}
-        for sh in shards:
-            for r in json.loads(sh.read_text())["results"]:
-                merged[r["id"]] = r
-        res = list(merged.values())
-        ev = {"rate": round(sum(r["ok"] for r in res) / max(1, len(res)), 3),
-              "compile_pass": sum(r["ok"] for r in res),
-              "total": len(res), "results": res}
-        partial = True
-    try:
         gd = json.loads((d / "eval" / "guard.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError):
-        gd = {"rate": None}
+        return None
     meta = {}
     rj = d / "round.json"
     if rj.exists():
         meta = json.loads(rj.read_text())
     res = ev["results"]
-    return {"dir": d.name, "partial": partial,
-            "config": meta.get("round", d.name),
+    return {"dir": d.name, "config": meta.get("round", d.name),
             "meta": meta, "rate": ev["rate"],
             "first_shot": sum(1 for r in res if r["ok"]
                               and not r.get("repair_rounds_used")) / max(1, ev["total"]),
-            "guard": gd["rate"] if gd["rate"] is not None else -1.0,
+            "guard": gd["rate"],
             "trunc": sum(1 for r in res if r.get("truncated") and not r["ok"]),
             "fails_by_family": Counter(family(r["id"]) for r in res if not r["ok"]),
             "ok_ids": {r["id"] for r in res if r["ok"]}}
@@ -82,10 +67,8 @@ def config_rows(runs):
             "mean": statistics.mean(rates),
             "min": min(rates), "max": max(rates),
             "sigma": statistics.stdev(rates) if len(rates) > 1 else 0.0,
-            "guard_min": min((r["guard"] for r in rs if r["guard"] >= 0), default=-1),
+            "guard_min": min(r["guard"] for r in rs),
             "guard_pass": sum(1 for r in rs if r["guard"] >= 0.9),
-            "guarded": sum(1 for r in rs if r["guard"] >= 0),
-            "partials": sum(1 for r in rs if r.get("partial")),
             "first_shot": statistics.mean(r["first_shot"] for r in rs),
             "trunc": sum(r["trunc"] for r in rs),
             "runs": rs})
@@ -94,7 +77,7 @@ def config_rows(runs):
 
 
 def verdict_of(row):
-    if row["guard_pass"] < row.get("guarded", row["n"]):
+    if row["guard_pass"] < row["n"]:
         return "GUARD-FAIL"
     if row["trunc"] > 20 * row["n"]:
         return "DEGENERATE"
@@ -115,9 +98,8 @@ def main():
     for r in rows:
         print(f"{r['config']:8} {r['mix']:10} {str(r['drill']):5} {r['n']:<2} "
               f"{r['mean']:.3f}  {r['min']:.3f}-{r['max']:.3f} {r['sigma']:.3f}  "
-              f"{r['guard_min']:.3f}   {r['guard_pass']}/{r['guarded']:<3} "
-              f"{r['first_shot']:.3f}  {r['trunc']:<5} {verdict_of(r)}"
-              + (f" [{r['partials']} partial]" if r.get("partials") else ""))
+              f"{r['guard_min']:.3f}   {r['guard_pass']}/{r['n']:<3} "
+              f"{r['first_shot']:.3f}  {r['trunc']:<5} {verdict_of(r)}")
 
     ok_rows = [r for r in rows if verdict_of(r) == "ok"]
     winner = ok_rows[0] if ok_rows else None
@@ -172,7 +154,7 @@ def main():
 
     print("\n== verdict ==")
     if gaps:
-        print(f"PAUSED-GAPS: missing evals for {gaps}")
+        print(f"GAPS — RE-RUN REQUIRED: {gaps}")
     elif winner and winner["mean"] >= 0.9:
         print("CLOSE-STAGE: winner clears the release bar")
     elif winner:
