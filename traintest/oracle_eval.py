@@ -54,16 +54,21 @@ def generate_batch(model, tok, batch_msgs, system, max_new):
     try:
         return _generate_batch_once(model, tok, batch_msgs, system, max_new,
                                     pad)
-    except torch.OutOfMemoryError:
+    except torch.OutOfMemoryError as e:
         # 16 long-winded sequences fragment the growing KV cache (base-model
         # eval OOMed at 53 GiB with 8-10 GiB reserved-unallocated). Rows are
         # independent under left-padded greedy — split and retry.
         if len(batch_msgs) == 1:
+            free, total = torch.cuda.mem_get_info()
+            print("generate_batch: FATAL single-seq OOM — %s | free %.1f/%.1f GiB"
+                  % (str(e).splitlines()[0][:200], free / 2**30, total / 2**30),
+                  flush=True)
+            print(torch.cuda.memory_summary(abbreviated=True), flush=True)
             raise
         torch.cuda.empty_cache()
         mid = len(batch_msgs) // 2
-        print(f"generate_batch: OOM at batch {len(batch_msgs)} — splitting",
-              flush=True)
+        print(f"generate_batch: OOM at batch {len(batch_msgs)} — splitting"
+              f" ({str(e).splitlines()[0][:120]})", flush=True)
         return (generate_batch(model, tok, batch_msgs[:mid], system, max_new)
                 + generate_batch(model, tok, batch_msgs[mid:], system,
                                  max_new))
