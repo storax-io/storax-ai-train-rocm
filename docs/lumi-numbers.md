@@ -111,8 +111,8 @@ accumulation boundaries (DDP's reducer buckets + engine gradients need
 
 Production geometry: batch 8 + flash-attention-2 (batch 4 fallback if
 long-run fragmentation erodes the 7.5 GiB margin). Node throughput
-~8,300 tok/s -> **1 Btok = ~33.5 node-hours = 268 GCD-h = 134 module-h**
-at 14B. Reproducibility: two independent jobs on different nodes gave
+~8,300 tok/s -> **1 Btok = ~134 GPU-hours** (LUMI accounting: 1 GPU =
+one MI250X; ~33.5 node-hours) at 14B. Reproducibility: two independent jobs on different nodes gave
 identical loss trajectories and 52.3/52.1% at batch 2. GCD->NUMA map
 (3,3,1,1,0,0,2,2) verified against rocm-smi on the full node; core
 pinning via TRAINTEST_CORE_MAP confirmed active.
@@ -128,6 +128,6 @@ pinning via TRAINTEST_CORE_MAP confirmed active.
 Per-GCD steady rate flat across widths (~1,020-1,030 tok/s); scaling cost
 confined to accumulation-boundary allreduce steps (4.0s -> 6.5s at 4
 nodes, amortized /8). Peak memory width-invariant (56.48 GiB). A 50M-token
-phase-B round on 4 nodes: ~50 min wall, ~26 GCD-h. One 2-node attempt
+phase-B round on 4 nodes: ~50 min wall, ~7.3 GPU-hours. One 2-node attempt
 died to a GPU Hang on a single sick node (nid007383) during weight upload
 — retry on excluded node passed; node-lottery, not workload.

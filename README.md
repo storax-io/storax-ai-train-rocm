@@ -102,7 +102,7 @@ published MI250X trainings achieve.
 
 Scaling: 96.5% at 2 nodes, 94.4% at 4 (production geometry, manual
 grad-sync amortized over the accumulation window). ~8,300 tok/s per
-node → **1 Btok ≈ 268 GCD-hours** at 14B. Full tables, the scaling
+node → **1 Btok ≈ 134 GPU-hours** at 14B (LUMI accounting: 1 GPU = one MI250X). Full tables, the scaling
 ladder, and the findings each number was bought with:
 [docs/lumi-numbers.md](docs/lumi-numbers.md).
 
