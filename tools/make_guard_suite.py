@@ -14,12 +14,19 @@ from pathlib import Path
 
 def main():
     src, out = sys.argv[1], sys.argv[2]
+    cap = int(sys.argv[3]) if len(sys.argv) > 3 else 64
     pairs = json.loads(Path(src).read_text())
-    lines = [json.dumps({"id": f"guard-cpp-{i:02d}", "family": "guard-cpp",
+    if len(pairs) > cap:
+        # replay scaled to 1500+ pairs (retention-band fix): TRAINING uses
+        # them all; the guard EVAL samples a deterministic subset so the
+        # verdict stays inside the eval SLO (~64 tasks ~= 2-3 min)
+        from random import Random
+        pairs = Random("guard-suite").sample(pairs, cap)
+    lines = [json.dumps({"id": f"guard-cpp-{i:03d}", "family": "guard-cpp",
                          "prompt": p["prompt"]})
              for i, p in enumerate(pairs)]
     Path(out).write_text("\n".join(lines) + "\n")
-    print(f"guard suite: {len(lines)} tasks -> {out}")
+    print(f"guard suite: {len(lines)} tasks (of {len(json.loads(Path(src).read_text()))}) -> {out}")
 
 
 if __name__ == "__main__":
