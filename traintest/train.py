@@ -175,6 +175,16 @@ def main():
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile via Inductor/Triton (experimental on Windows ROCm)")
     ap.add_argument("--save-model", action="store_true")
+    # phase-C segment chains: a 1-Btok consolidation is trained as chained
+    # Slurm jobs sharing ONE LR schedule. --total-steps is the schedule
+    # horizon; --save-state writes optimizer+counters beside the model;
+    # --resume-state restores them and fast-skips the data stream to the
+    # saved step (deterministic perms — no state needed for data order).
+    ap.add_argument("--total-steps", type=int, default=0,
+                    help="LR schedule horizon across ALL segments (0 = this run's steps)")
+    ap.add_argument("--save-state", action="store_true")
+    ap.add_argument("--resume-state", default="",
+                    help="train_state.pt from the previous segment")
     ap.add_argument("--only-think", action="store_true",
                     help="continue-training: think-QA + replay anchors only "
                          "(use with --model <trained dir>)")
@@ -302,7 +312,8 @@ def main():
     # final loss 0.44 vs healthy full4's 0.75). Linear decay to 0 ends the
     # run gently; 20-step warmup avoids the first-step shock.
     shard_len = len(samples) // world
-    total_steps = args.max_steps or args.epochs * (shard_len // args.batch)
+    total_steps = args.total_steps or args.max_steps \
+        or args.epochs * (shard_len // args.batch)
     warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*optimizer.step.*")
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / 20, max(0.0, 1 - s / max(total_steps, 1))))
@@ -325,6 +336,18 @@ def main():
         torch.cuda.reset_peak_memory_stats()
     step = 0
     tokens_done = 0
+    start_step = 0
+    if args.resume_state:
+        st = torch.load(args.resume_state, map_location="cpu",
+                        weights_only=False)
+        opt.load_state_dict(st["optimizer"])
+        start_step = int(st["step"])
+        tokens_done = int(st.get("tokens_done", 0))
+        for _ in range(start_step):
+            sched.step()
+        if is_main:
+            print(f"resume: step {start_step}, {tokens_done} tokens done, "
+                  f"optimizer state restored", flush=True)
     step_rates = []  # tok/s per step, for steady-state (warmup-free) stats
     t_start = time.perf_counter()
     stop = False
@@ -339,6 +362,12 @@ def main():
         # takes a disjoint stride so the union covers the epoch exactly.
         perm = torch.randperm(len(samples), generator=g).tolist()[rank::world]
         for i in range(0, len(perm) - args.batch + 1, args.batch):
+            if step < start_step:
+                # fast-skip to the resume point: perms are deterministic,
+                # so consuming loop positions (no collate/compute/sched —
+                # the scheduler was pre-advanced) replays the data order
+                step += 1
+                continue
             batch = [samples[j] for j in perm[i : i + args.batch]]
             input_ids, labels, attn = collate(batch)
             input_ids, labels, attn = (input_ids.to(device),
@@ -418,7 +447,7 @@ def main():
             # ABORT-SLOWDOWN: >3x steady-state step time sustained ~10
             # steps = the DWM-class failure signature (paging, sick GPU)
             step_times.append(dt)
-            if baseline_dt is None and step == 25:
+            if baseline_dt is None and step == start_step + 25:
                 mid = sorted(step_times[5:])
                 baseline_dt = mid[len(mid) // 2]
             if baseline_dt is not None and dt > 3 * baseline_dt:
@@ -475,6 +504,11 @@ def main():
 
     if world > 1:
         dist.barrier()
+    if args.save_state and is_main:
+        state_dst = out / "train_state.pt"
+        torch.save({"optimizer": opt.state_dict(), "step": step,
+                    "tokens_done": tokens_done}, state_dst)
+        print(f"train state -> {state_dst}", flush=True)
     if args.save_model and is_main:
         target = model._orig_mod if hasattr(model, "_orig_mod") else model
         target = target.module if hasattr(target, "module") else target
