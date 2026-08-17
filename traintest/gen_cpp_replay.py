@@ -58,12 +58,40 @@ def extract_code(text):
     return (m.group(1) if m else text).strip()
 
 
+def load_task_prompts(path, count, seed=0):
+    """Prompt scale-up (retention-band starvation fix, 2026-08-17): sample
+    single-fragment BASELINE/LEGACY instructions from a trainpack stream
+    and re-address them as plain-C++ asks for the BASE model. Base-model
+    answers to training-shaped tasks are exactly what the replay band
+    needs at 43k-record corpus scale — 88 pairs could not hold the line
+    (gen-3/gen-4 guard 0.41-0.56 vs 0.9)."""
+    import json as _j
+    from random import Random
+    prompts = []
+    for ln in Path(path).open():
+        try:
+            r = _j.loads(ln)
+        except ValueError:
+            continue
+        pr = r.get("prompt", "")
+        if pr and r.get("source", "").count("  {") == 1:
+            prompts.append(pr.replace("C++26 program", "C++ program"))
+    Random(f"replay:{seed}").shuffle(prompts)
+    return prompts[:count]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--system", default=None)
     ap.add_argument("--max-new", type=int, default=1200)  # 600 truncated
     # every answer from the more verbose 14B (0/30 kept, LUMI job 21140120)
+    ap.add_argument("--tasks-file", action="append", default=[],
+                    help="jsonl stream(s) to sample additional prompts from "
+                         "(single-fragment records only)")
+    ap.add_argument("--count", type=int, default=0,
+                    help="total prompts incl. the builtin 30 (0 = builtin only)")
+    ap.add_argument("--batch", type=int, default=24)
     args = ap.parse_args()
 
     oracle = Oracle()
@@ -71,33 +99,42 @@ def main():
     model = hfcompat.load_causal_model(args.model, torch.bfloat16, "sdpa")
     model.cuda().eval()
 
-    kept, rejected = [], 0
-    for i, task in enumerate(TASKS):
-        prompt = task + " Only output the code."
-        ids = hfcompat.chat_prompt_ids(
-            tok, [{"role": "user", "content": prompt}], thinking=False,
-            system=args.system).unsqueeze(0).cuda()
-        with torch.no_grad():
-            out = model.generate(ids, attention_mask=torch.ones_like(ids),
-                                 max_new_tokens=args.max_new, do_sample=False,
-                                 pad_token_id=tok.eos_token_id)
-        gen_ids = out[0, ids.shape[1]:]
-        truncated = gen_ids[-1].item() != tok.eos_token_id
-        code = extract_code(tok.decode(gen_ids, skip_special_tokens=True))
-        v = oracle.compile(code, run=True)
-        if v.get("ok") and v.get("run_rc") == 0 and not truncated:
-            kept.append({"prompt": prompt, "code": code})
-        else:
-            rejected += 1
-            # a reject must explain itself — 0/30 with silent discards
-            # cost a rerun to diagnose (LUMI job 21140120)
-            err = (v.get("stderr") or v.get("run_stderr") or "")
-            reason = ("TRUNCATED at max-new" if truncated else
-                      "; ".join(err.splitlines()[:2]) or f"rc={v.get('run_rc')}")
-            print(f"reject[{i}]: {reason}\n  head: {code[:120]!r}", flush=True)
-        if (i + 1) % 10 == 0:
-            print(f"{i + 1}/{len(TASKS)} kept={len(kept)}", flush=True)
+    tasks = list(TASKS)
+    if args.count > len(tasks) and args.tasks_file:
+        extra_n = args.count - len(tasks)
+        per = extra_n // len(args.tasks_file) + 1
+        for tf in args.tasks_file:
+            tasks += load_task_prompts(tf, per)
+        tasks = tasks[:args.count]
+    print(f"replay prompts: {len(tasks)}", flush=True)
 
+    from oracle_eval import generate_batch
+    kept, rejected = [], 0
+    for bi in range(0, len(tasks), args.batch):
+        chunk = [t + " Only output the code." for t in tasks[bi:bi + args.batch]]
+        with torch.no_grad():
+            gens = generate_batch(model, tok,
+                                  [[{"role": "user", "content": c}] for c in chunk],
+                                  args.system, args.max_new)
+        for prompt, (text, truncated, _tok) in zip(chunk, gens):
+            code = extract_code(text)
+            v = oracle.compile(code, run=True)
+            if v.get("ok") and v.get("run_rc") == 0 and not truncated:
+                kept.append({"prompt": prompt, "code": code})
+            else:
+                rejected += 1
+                if rejected <= 10:   # rejects explain themselves (job 21140120)
+                    err = (v.get("stderr") or v.get("run_stderr") or "")
+                    reason = ("TRUNCATED" if truncated else
+                              "; ".join(err.splitlines()[:2]) or f"rc={v.get('run_rc')}")
+                    print(f"reject: {reason}\n  head: {code[:120]!r}", flush=True)
+        print(f"replay: {len(kept)} kept / {len(kept) + rejected} judged",
+              flush=True)
+    _finish(kept, rejected)
+    return
+
+
+def _finish(kept, rejected):
     dest = Path(os.environ.get("TRAINTEST_REPLAY_DIR",
                             Path(__file__).resolve().parent)) / "cpp_replay.json"
     dest.write_text(json.dumps(kept, indent=1), encoding="utf-8")
