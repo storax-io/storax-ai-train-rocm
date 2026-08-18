@@ -185,6 +185,13 @@ def main():
     ap.add_argument("--save-state", action="store_true")
     ap.add_argument("--resume-state", default="",
                     help="train_state.pt from the previous segment")
+    ap.add_argument("--midsave-every", type=int, default=0,
+                    help="save resumable state every N steps mid-segment "
+                         "(0 = only at segment end); a cancelled segment "
+                         "then loses at most N steps")
+    ap.add_argument("--midsave-dir", default="",
+                    help="dir for mid-segment saves (template ships it to "
+                         "flash continuously)")
     ap.add_argument("--only-think", action="store_true",
                     help="continue-training: think-QA + replay anchors only "
                          "(use with --model <trained dir>)")
@@ -492,6 +499,29 @@ def main():
                     raise SystemExit(4)
             else:
                 slow_streak = 0
+            if (args.midsave_every and args.midsave_dir and is_main
+                    and step % args.midsave_every == 0
+                    and step > start_step and step < (args.max_steps or 1 << 60)):
+                # bounded-loss checkpoint: rank0 writes model+state to a tmp
+                # dir and atomically renames; other ranks stall at the next
+                # collective for the write duration (~1 min) — that is the
+                # entire training cost of losing <=N steps on a cancel
+                import shutil as _sh
+                _t0 = time.perf_counter()
+                md = Path(args.midsave_dir)
+                tmp = md / "saving"
+                _sh.rmtree(tmp, ignore_errors=True)
+                target = model._orig_mod if hasattr(model, "_orig_mod") else model
+                target = target.module if hasattr(target, "module") else target
+                target.save_pretrained(tmp / "model", safe_serialization=True)
+                tok.save_pretrained(tmp / "model")
+                torch.save({"optimizer": opt.state_dict(), "step": step,
+                            "tokens_done": tokens_done}, tmp / "train_state.pt")
+                final = md / "latest"
+                _sh.rmtree(final, ignore_errors=True)
+                tmp.rename(final)
+                print(f"midsave: step {step} ({time.perf_counter() - _t0:.0f}s)",
+                      flush=True)
             if args.max_steps and step >= args.max_steps:
                 stop = True
                 break
