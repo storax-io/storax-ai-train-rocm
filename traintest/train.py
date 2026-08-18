@@ -362,6 +362,12 @@ def main():
     import faulthandler
     import signal as _signal
     faulthandler.register(_signal.SIGUSR1, all_threads=True)
+    # in-process hang forensics (v2): USR1 via scancel killed the torchrun
+    # wrappers before handlers ran. dump_traceback_later needs NO signals:
+    # each rank re-arms a 900s dead-man timer every step; a wedged rank
+    # prints all its thread stacks to stderr BY ITSELF, job keeps running
+    # long enough for the log to capture every rank's dump.
+    faulthandler.dump_traceback_later(900, exit=False)
     step = 0
     tokens_done = 0
     start_step = 0
@@ -469,6 +475,7 @@ def main():
                 torch.cuda.synchronize()
             dt = time.perf_counter() - t0
 
+            faulthandler.dump_traceback_later(900, exit=False)  # re-arm
             step += 1
             tokens_done += int(attn.sum().item())
             rec = {"step": step, "epoch": epoch, "loss": round(loss.item(), 4),
