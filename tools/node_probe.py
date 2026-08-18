@@ -24,25 +24,42 @@ import torch
 
 
 def probe_fs():
+    """FLASH is the critical path (scratch left it 2026-08-18): flash
+    read+write are FATAL checks. Scratch gets a bounded, NON-FATAL probe
+    in a thread — a sick scratch is reported, never kills a job that no
+    longer touches it."""
     host = socket.gethostname()
-    # read: hot inputs both tiers; write+fsync+unlink: scratch
-    reads = ["/flash/project_465003284/SYNC_MANIFEST.json",
-             "/scratch/project_465003284/data/cpp26ds-var/trainpack.json"]
-    for f in reads:
-        if os.path.exists(f):
-            with open(f, "rb") as fh:
-                fh.read(1 << 20)
-    wpath = f"/scratch/project_465003284/.probe-{host}-{os.getpid()}"
-    try:
-        fd = os.open(wpath, os.O_CREAT | os.O_WRONLY, 0o644)
-        os.write(fd, b"probe")
-        os.fsync(fd)
-        os.close(fd)
-    finally:
+    f = "/flash/project_465003284/SYNC_MANIFEST.json"
+    if os.path.exists(f):
+        with open(f, "rb") as fh:
+            fh.read(1 << 20)
+    wpath = f"/flash/project_465003284/.probe-{host}-{os.getpid()}"
+    fd = os.open(wpath, os.O_CREAT | os.O_WRONLY, 0o644)
+    os.write(fd, b"probe")
+    os.fsync(fd)
+    os.close(fd)
+    os.unlink(wpath)
+    # scratch: informational only, 20s bound via daemon thread
+    import threading
+
+    def scratch_check():
         try:
-            os.unlink(wpath)
+            sp = f"/scratch/project_465003284/.probe-{host}-{os.getpid()}"
+            sfd = os.open(sp, os.O_CREAT | os.O_WRONLY, 0o644)
+            os.write(sfd, b"p")
+            os.fsync(sfd)
+            os.close(sfd)
+            os.unlink(sp)
+            scratch_check.ok = True
         except OSError:
             pass
+    scratch_check.ok = False
+    t = threading.Thread(target=scratch_check, daemon=True)
+    t.start()
+    t.join(20)
+    if not scratch_check.ok:
+        print(f"NODE-PROBE {host}: WARNING scratch unresponsive "
+              f"(non-fatal — not in the critical path)", flush=True)
 
 
 def main():
