@@ -356,6 +356,12 @@ def main():
                 f"(< {args.min_free_vram} required). Close GPU-heavy apps "
                 f"or restart dwm.exe, then retry.")
         torch.cuda.reset_peak_memory_stats()
+    # hang forensics: on SIGUSR1 every rank dumps all python stacks to
+    # stderr (lands in the slurm log) — the watchdog sends USR1 before
+    # KILL, so a wedged collective names its exact line on every rank
+    import faulthandler
+    import signal as _signal
+    faulthandler.register(_signal.SIGUSR1, all_threads=True)
     step = 0
     tokens_done = 0
     start_step = 0
