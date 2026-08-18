@@ -435,18 +435,26 @@ def main():
                 raise
             if will_sync and world > 1 and args.grad_sync == "manual":
                 # in-place allreduce on param.grad: zero extra memory,
-                # amortized over the accumulation window
+                # amortized over the accumulation window. CHUNKED (2026-08-18):
+                # launching ALL ~400 collectives async then waiting flooded
+                # the fabric at 512 ranks — both 64-node segments wedged at
+                # the FIRST accum boundary while 256 ranks absorbed it.
+                # Bounded in-flight collectives cost ~nothing at small width
+                # and are the difference between working and wedged at 64n.
                 grads = [p.grad for p in model.parameters()
                          if p.grad is not None]
-                works = [torch.distributed.all_reduce(g, async_op=True)
-                         for g in grads]
-                for w in works:
-                    w.wait()
+                CHUNK = 16
+                for ci in range(0, len(grads), CHUNK):
+                    works = [torch.distributed.all_reduce(g, async_op=True)
+                             for g in grads[ci:ci + CHUNK]]
+                    for w in works:
+                        w.wait()
+                    del works
                 torch._foreach_mul_(grads, 1.0 / world)
                 # these locals otherwise persist to the NEXT boundary and
                 # pin all 22.5 GiB of freed grads through the following
                 # backward — double-grad OOM (LUMI job 21138910)
-                del grads, works
+                del grads
             if will_sync:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
