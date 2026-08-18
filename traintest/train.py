@@ -363,10 +363,18 @@ def main():
         if is_main:
             print(f"resume: step {start_step}, {tokens_done} tokens done, "
                   f"optimizer state restored", flush=True)
-    # phase beacons: if a resume segment wedges, the LAST beacon printed
-    # names the phase (state-load vs skip vs first-step collective)
+    # phase gate: a plain RCCL barrier here WEDGES silently if any rank is
+    # stuck loading (c1-seg3 attempt 7: resume printed, barrier never
+    # passed — no way to see WHICH rank). gloo monitored_barrier raises
+    # after a bounded wait NAMING the missing ranks; every rank also
+    # self-reports its load time so a slow loader identifies itself.
     if world > 1:
-        torch.distributed.barrier()
+        import datetime
+        print(f"rank {rank}: load complete, entering barrier", flush=True)
+        gloo_pg = torch.distributed.new_group(backend="gloo")
+        torch.distributed.monitored_barrier(
+            group=gloo_pg, timeout=datetime.timedelta(seconds=900),
+            wait_all_ranks=True)
     if is_main:
         print("phase: all ranks past state-load, entering data skip",
               flush=True)
