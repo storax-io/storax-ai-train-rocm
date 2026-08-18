@@ -248,8 +248,23 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    metrics_f = ((out / "metrics.jsonl").open("w") if is_main
-                 else open(os.devnull, "w"))
+    # LAZY metrics open: the watchdog treats an existing-but-stale
+    # metrics.jsonl as a hang — creating it empty at startup made slow
+    # resume startups (256-rank state loads) indistinguishable from
+    # wedges (c1-seg3 killed twice, 2026-08-18). First write creates it.
+    class _LazyMetrics:
+        def __init__(self, path, live):
+            self._path, self._live, self._f = path, live, None
+        def write(self, ln):
+            if not self._live:
+                return
+            if self._f is None:
+                self._f = self._path.open("w")
+            self._f.write(ln)
+        def flush(self):
+            if self._f is not None:
+                self._f.flush()
+    metrics_f = _LazyMetrics(out / "metrics.jsonl", is_main)
 
     tok = hfcompat.load_tokenizer(args.model)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
@@ -348,6 +363,13 @@ def main():
         if is_main:
             print(f"resume: step {start_step}, {tokens_done} tokens done, "
                   f"optimizer state restored", flush=True)
+    # phase beacons: if a resume segment wedges, the LAST beacon printed
+    # names the phase (state-load vs skip vs first-step collective)
+    if world > 1:
+        torch.distributed.barrier()
+    if is_main:
+        print("phase: all ranks past state-load, entering data skip",
+              flush=True)
     step_rates = []  # tok/s per step, for steady-state (warmup-free) stats
     t_start = time.perf_counter()
     stop = False
@@ -368,6 +390,9 @@ def main():
                 # the scheduler was pre-advanced) replays the data order
                 step += 1
                 continue
+            if step == start_step and start_step and is_main:
+                print(f"phase: skip done at step {step}, first real batch",
+                      flush=True)
             batch = [samples[j] for j in perm[i : i + args.batch]]
             input_ids, labels, attn = collate(batch)
             input_ids, labels, attn = (input_ids.to(device),
