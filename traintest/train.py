@@ -245,8 +245,15 @@ def main():
                 print(f"affinity: rank0 -> cores {sorted(cores)} "
                       f"(map has {len(ranges)} entries)", flush=True)
     if world > 1:
+        # patient collectives (2026-08-18): a Lustre backlog can stall a
+        # rank 30-40 min and then CLEAR — torch's default ~10-min NCCL
+        # timeout executes runs that would self-heal. Dead-man stack dumps
+        # (7 min) still tell us WHERE it is stuck while we wait it out.
+        import datetime as _dt
         dist.init_process_group(
-            args.dist_backend or ("nccl" if use_cuda else "gloo"))
+            args.dist_backend or ("nccl" if use_cuda else "gloo"),
+            timeout=_dt.timedelta(minutes=int(
+                os.environ.get("TRAINTEST_PG_TIMEOUT_MIN", "45"))))
     device = torch.device(f"cuda:{local_rank}" if use_cuda else "cpu")
     if use_cuda:
         torch.cuda.set_device(device)  # current-device APIs (allocator
