@@ -272,8 +272,13 @@ def main():
             s["truncated"] = truncated
             s["gen_tokens"] = s.get("gen_tokens", 0) + n_tok
             s["code"] = extract_code(gen)
+            # benchmark tasks carry an `append` blob (their own test main,
+            # MultiPL-E style): assemble model code + tests before judging
+            _payload = s["code"]
+            if s["task"].get("append"):
+                _payload = _payload + "\n" + s["task"]["append"]
             try:
-                s["verdict"] = oracle.compile(s["code"], run=args.run)
+                s["verdict"] = oracle.compile(_payload, run=args.run)
             except Exception as e:  # noqa: BLE001 — oracle/network failure
                 s["verdict"] = {"ok": False, "error": repr(e)}
             s["ok"] = bool(s["verdict"].get("ok")) and (
