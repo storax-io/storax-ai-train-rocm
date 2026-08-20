@@ -136,6 +136,36 @@ def training_qa_pairs():
         print(f"drill cap: {len(bases)} -> {len(picked)} bases "
               f"(share {DRILL_SHARE}); mutations follow", flush=True)
         bases = picked
+    # CLOSED-LOOP FAMILY WEIGHTS (Henri 2026-08-20: per-segment emphasis
+    # control, automatic, boiled close). CPP26DS_FAMILY_WEIGHTS is a JSON
+    # {family: multiplier} written by the converge controller from the
+    # PREVIOUS segment's eval — dose a falling family, taper a saturating
+    # one. Applied to drill bases (the controlled surface — where the
+    # rel5 saturation law lives); mutations follow their bases. w>1
+    # duplicates (round), w<1 subsamples deterministically.
+    fw_env = os.environ.get("CPP26DS_FAMILY_WEIGHTS", "")
+    if fw_env:
+        try:
+            fw = json.loads(fw_env)
+        except Exception:
+            print("FAMILY_WEIGHTS unparseable — ignored:", fw_env[:120],
+                  flush=True)
+            fw = {}
+        if fw:
+            wb = []
+            for r in bases:
+                w = float(fw.get(r["family"], 1.0))
+                n = max(0, round(w))
+                if w < 1.0:
+                    # deterministic subsample: keep by id-hash threshold
+                    keep = (hash(r["id"]) % 1000) < int(w * 1000)
+                    n = 1 if keep else 0
+                wb.extend([r] * max(n, 0))
+            print("family weights applied: %d -> %d drill bases (%s)"
+                  % (len(bases), len(wb),
+                     ",".join("%s=%.2f" % kv for kv in sorted(fw.items()))),
+                  flush=True)
+            bases = wb
     kept_ids = {r["id"] for r in bases}
     muts = [m for m in _MUTS if m["base_id"] in kept_ids]
 
