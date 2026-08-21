@@ -70,6 +70,13 @@ _BASELINE = sorted(_rows("synth-baseline.jsonl"), key=lambda r: r["id"])
 _IMPORTED = sorted((r for r in _rows("imported.jsonl")
                     if r.get("expected") == "ok"), key=lambda r: r["id"])
 _GUIDE = _rows("guidelines.jsonl")
+# v6 bands (2026-08-21): behavior-verified harvest winners (the model's
+# own oracle-adjudicated solutions to its hard tail) and compile-time-
+# compute references (Henri's fibonacci archetype — output-verifiable
+# consteval computation). Both 100% behavior-verified; absent files =
+# empty bands (packs before v6).
+_WINNERS = _rows("winners.jsonl")
+_CT = _rows("ct.jsonl")
 IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
 
 _rng = random.Random(SEED)
@@ -121,7 +128,8 @@ def training_qa_pairs():
     # Enforce DRILL_SHARE within the new pool: cap drill bases against
     # non-drill new QA mass, round-robin per family (coverage preserved);
     # mutations follow their kept bases.
-    other_new = len(_TRACES) + SYNTH_QA_N + len(_EDITS) + len(_MIXED)
+    other_new = (len(_TRACES) + SYNTH_QA_N + len(_EDITS) + len(_MIXED)
+                 + len(_WINNERS) + len(_CT))
     bases = sorted(_BASES.values(), key=lambda r: r["id"])
     max_bases = int(DRILL_SHARE / (1 - DRILL_SHARE) * max(other_new, 1))
     if len(bases) > max_bases:
@@ -173,7 +181,7 @@ def training_qa_pairs():
     # QA mass: generator's synth-baseline stream + our model-native
     # anchors (duplication only for any remaining shortfall).
     new_mass = (len(bases) + len(_TRACES) + SYNTH_QA_N + len(_EDITS)
-                + len(muts) + len(_MIXED))
+                + len(muts) + len(_MIXED) + len(_WINNERS) + len(_CT))
     base_pool = ([(r["prompt"] + " Only output the code.",
                    _fenced(r["source"])) for r in _BASELINE]
                  + [(r["prompt"], _fenced(r["code"]))
@@ -205,6 +213,12 @@ def training_qa_pairs():
     for r in _TRACES:
         out.append((r["prompt"] + " Only output the code.",
                     _fenced(r["source"])))
+    for r in _WINNERS:
+        out.append((r["prompt"] + " Only output the code.",
+                    _fenced(r["source"])))
+    for r in _CT:
+        out.append((r["prompt"] + " Only output the code.",
+                    _fenced(r["source"])))
     for r in _SYNTH_SHUF[SYNTH_TEXT_N:SYNTH_TEXT_N + SYNTH_QA_N]:
         out.append((r["prompt"] + " Only output the code.",
                     _fenced(r["source"])))
@@ -233,6 +247,7 @@ if __name__ == "__main__":
         "dir": str(_DIR),
         "level0_bases": len(_BASES), "repair_pairs": len(_MUTS),
         "teacher_traces": len(_TRACES), "edits": len(_EDITS),
+        "winners": len(_WINNERS), "ct": len(_CT),
         "synth_total": len(_SYNTH),
         "packed_texts": min(SYNTH_TEXT_N, len(_SYNTH)),
         "qa_pairs": len(training_qa_pairs()),
