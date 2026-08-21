@@ -276,7 +276,15 @@ def main():
             # MultiPL-E style): assemble model code + tests before judging
             _payload = s["code"]
             if s["task"].get("append"):
-                _payload = _payload + "\n" + s["task"]["append"]
+                # external tests supply their own main: a model-written
+                # main would collide — strip it (identical normalization
+                # for every model; the tests are the arbiter)
+                import re as _re
+                m = _re.search(r"^int\s+main\s*\(", _payload, _re.M)
+                if m:
+                    _payload = _payload[:m.start()].rstrip()
+                _payload = (s["task"].get("prepend", "") + _payload
+                            + "\n" + s["task"]["append"])
             try:
                 s["verdict"] = oracle.compile(_payload, run=args.run)
             except Exception as e:  # noqa: BLE001 — oracle/network failure
