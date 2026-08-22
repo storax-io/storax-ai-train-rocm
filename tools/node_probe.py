@@ -71,10 +71,24 @@ def main():
         return 1
     for d in range(n):
         torch.cuda.set_device(d)
-        x = torch.randn(2048, 2048, dtype=torch.bfloat16, device=f"cuda:{d}")
-        y = (x @ x).float().sum()
+        # LOAD-CLASS stress (2026-08-22, nid006946: passed the gentle
+        # 2048^2 pat, hung at 14B load — the probe must reproduce real
+        # pressure while the SPARE NODE is still held, which is the
+        # entire point of the spare): ~14 GiB residency + three 8192^2
+        # bf16 GEMMs per device. A hang parks this process; the
+        # wrapper's timeout converts that into NODE-FAIL at probe time.
+        big = torch.empty(7 * 1024**3, dtype=torch.bfloat16,
+                          device=f"cuda:{d}")
+        big.uniform_()
+        x = torch.randn(8192, 8192, dtype=torch.bfloat16, device=f"cuda:{d}")
+        y = x
+        for _ in range(3):
+            y = y @ x
+        r = y.float().sum()
         torch.cuda.synchronize(d)
-        if not torch.isfinite(y).item():
+        del big, x, y
+        torch.cuda.empty_cache()
+        if not torch.isfinite(r).item():
             print(f"NODE-PROBE {socket.gethostname()}: device {d} "
                   f"non-finite GEMM result", flush=True)
             return 1
