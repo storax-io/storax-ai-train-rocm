@@ -29,11 +29,15 @@ def probe_fs():
     in a thread — a sick scratch is reported, never kills a job that no
     longer touches it."""
     host = socket.gethostname()
-    f = "/flash/project_465003284/SYNC_MANIFEST.json"
+    # tier follows the job root (2026-08-22, flash dropped from the
+    # flow): the CRITICAL tier is wherever this job actually lives;
+    # the other tier is probed informationally by the in-run sentinel.
+    root = os.environ.get("STORAX_ROOT", "/flash/project_465003284")
+    f = root + "/SYNC_MANIFEST.json"
     if os.path.exists(f):
         with open(f, "rb") as fh:
             fh.read(1 << 20)
-    wpath = f"/flash/project_465003284/.probe-{host}-{os.getpid()}"
+    wpath = f"{root}/.probe-{host}-{os.getpid()}"
     fd = os.open(wpath, os.O_CREAT | os.O_WRONLY, 0o644)
     os.write(fd, b"probe")
     os.fsync(fd)
