@@ -72,7 +72,7 @@ def babble_ratio(text):
 
 def st_headers(model_dir):
     """dtype/param census from safetensors headers alone (no torch)."""
-    census, total_bytes, n_tensors = {}, 0, 0
+    census, total_bytes, names = {}, 0, set()
     for f in sorted(Path(model_dir).glob("*.safetensors")):
         with f.open("rb") as fh:
             n = struct.unpack("<Q", fh.read(8))[0]
@@ -80,11 +80,11 @@ def st_headers(model_dir):
         for k, v in hdr.items():
             if k == "__metadata__":
                 continue
-            n_tensors += 1
+            names.add(k)
             census[v["dtype"]] = census.get(v["dtype"], 0) + 1
             a, b = v["data_offsets"]
             total_bytes += b - a
-    return census, total_bytes, n_tensors
+    return census, total_bytes, names
 
 
 def ids_of(tok, msgs, system=None, gen_prompt=True):
@@ -138,7 +138,8 @@ def phase_a(model_dir, findings, report):
     cfg = json.loads((Path(model_dir) / "config.json").read_text())
     arch = cfg.get("architectures", ["?"])
     tcfg = cfg.get("text_config", cfg)
-    census, nbytes, ntens = st_headers(model_dir)
+    census, nbytes, tnames = st_headers(model_dir)
+    ntens = len(tnames)
     report["config"] = {
         "architectures": arch, "torch_dtype": cfg.get("torch_dtype")
         or tcfg.get("torch_dtype"),
@@ -155,6 +156,16 @@ def phase_a(model_dir, findings, report):
         findings.append(("WARN", "weights-dtype",
                          f"dominant dtype {major} — quantize/convert from the"
                          " bf16 master, not from this"))
+    # tie-vs-checkpoint disagreement: a converter trusting the config could
+    # drop the TRAINED lm_head and reuse embeddings (silent quality loss);
+    # transformers refuses the tie at load, but GGUF converters may not.
+    has_lm_head = any(n.endswith("lm_head.weight") for n in tnames)
+    tied_cfg = cfg.get("tie_word_embeddings", tcfg.get("tie_word_embeddings"))
+    if has_lm_head and tied_cfg:
+        findings.append(("WARN", "tied-config-untied-weights",
+                         "config says tie_word_embeddings=true but checkpoint"
+                         " carries a distinct lm_head — set the config to"
+                         " false and verify converters export output.weight"))
 
     tok, ok = load_tokenizer(model_dir, findings)
     report["tokenizer"] = {"class": type(tok).__name__,
