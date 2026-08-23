@@ -32,6 +32,8 @@ flowchart LR
 
 Zero-cost readiness check. Verifies the staged code and data on the login node before anything is allowed to queue — a failed preflight blocks every launch verb.
 
+**Cost:** none (login-side). **Touches:** nothing — read-only verification.
+
 ```mermaid
 flowchart LR
     P[sc preflight] --> C["verify staged code + data<br/>against the sync manifest<br/>(login-side, zero cost)"]
@@ -42,6 +44,8 @@ flowchart LR
 ### `sc gen MANIFEST`
 
 Launches a whole generation from a manifest file: one training round per row, each with its failure janitor and a chained wide eval, so the verdicts arrive while later rounds are still training.
+
+**Cost:** one training round per manifest row (nodes × steps as specified) + one wide-eval node (~10 min) per row; janitors are ~free CPU jobs. **Touches:** runs/GEN/*, logs.
 
 ```mermaid
 flowchart LR
@@ -56,6 +60,8 @@ flowchart LR
 ### `sc rounds GEN ROUND MIX DRILL STEPS SEED…`
 
 Launches one recipe across a list of seeds — the seed-replication form of `gen` (≥3 seeds per config; single-seed comparisons are noise).
+
+**Cost:** one round + one eval per seed. **Touches:** runs/GEN/ROUND-sSEED.
 
 ```mermaid
 flowchart LR
@@ -73,6 +79,8 @@ command is the recovery procedure — completed segments are detected on
 disk and skipped, so a re-run only ever spends the *remaining* token
 budget, and the plateau cutoff can shrink even that.
 
+**Cost:** bounded by the UNSPENT part of MTOK (done segments skip; plateau cutoff cancels the pending tail) + one eval node per segment + one spare node per segment. **Touches:** runs/consol/NAME/seg*.
+
 ```mermaid
 flowchart TB
     LAD["width ladder (e.g. 8->16->32->64 nodes,<br/>custom --ladder n:mtok,…)<br/>ONE LR schedule across segments"] --> SEGS{"per segment:<br/>state already<br/>on disk?"}
@@ -89,6 +97,8 @@ flowchart TB
 ### `sc campaign PLAN.json [--continue|--reset]`
 
 Runs an unattended multi-stage arc from a JSON plan: each stage's terminal jobs chain a director job that gates on artifacts and submits the next stage. A failed gate pauses the line with the reason.
+
+**Cost:** the sum of its stages, one stage at a time; directors are ~free 10-min CPU jobs. **Touches:** campaign state/log + whatever each stage touches.
 
 ```mermaid
 flowchart TB
@@ -109,6 +119,8 @@ never what already exists**. The single recovery verb after any
 interruption or confusion. Reconcile itself is free (login-side,
 read-only); any GPU cost you see afterwards is the *unfinished
 remainder of the original plan* resuming, not work being redone.
+
+**Cost:** free in itself (login-side, read-only); anything it submits is the plan's missing remainder only. **Touches:** nothing directly — it only submits jobs.
 
 ```mermaid
 flowchart TB
@@ -135,6 +147,8 @@ human.
 
 Judges specific checkpoints: one wide (8-way sharded) eval job per run dir, each with its own janitor.
 
+**Cost:** one node × ~10 min per checkpoint. **Touches:** RUNDIR/eval/.
+
 ```mermaid
 flowchart LR
     RD["checkpoint dir(s)"] --> WE["wide eval per checkpoint:<br/>one node, sharded across<br/>its 8 GPUs, ~10 min"]
@@ -144,6 +158,8 @@ flowchart LR
 ### `sc sweep [--dense]`
 
 Finds every checkpoint that has a model but no verdict and judges them all — wide by default, packed 8-per-node with `--dense`.
+
+**Cost:** one node × ~10 min per gap (wide); --dense packs 8 checkpoints per node — same GPU-h, longer wall. **Touches:** each gap's eval/.
 
 ```mermaid
 flowchart TB
@@ -158,6 +174,8 @@ flowchart TB
 
 Evaluates any model directory against any suite through the standard judge — for baselining foreign models or re-scoring ours on new suites.
 
+**Cost:** one wide-eval node-run. **Touches:** runs/bench/TAG only.
+
 ```mermaid
 flowchart LR
     BM["any model dir<br/>x any suite"] --> CK2["both must exist<br/>(checked login-side)"]
@@ -171,6 +189,8 @@ flowchart LR
 
 Regenerates the retention band at scale: the base model answers plain-C++ prompts, the compiler keeps verified pairs. The anchor data that stops fine-tuning from eroding ordinary competence.
 
+**Cost:** one single-node generation job (scales with COUNT). **Touches:** the replay band artifact.
+
 ```mermaid
 flowchart LR
     RP[sc replay] --> GJ["generation job: the BASE model<br/>answers ~COUNT training-shaped<br/>plain-C++ prompts"]
@@ -181,6 +201,8 @@ flowchart LR
 ### `sc harvest TAG [--nodes N --samples K --temp T]`
 
 Expert-iteration burst: the model samples best-of-K answers to fresh prompts across N independent single-node jobs; oracle-verified winners become the next trainpack's expert band.
+
+**Cost:** N single-node jobs for the sampling wall-clock; re-runs pay only unfinished shards. **Touches:** runs/harvest/TAG.
 
 ```mermaid
 flowchart TB
@@ -197,6 +219,8 @@ flowchart TB
 
 Prefetches every registry package to shared storage from the login node, because compute nodes have no internet.
 
+**Cost:** login-node bandwidth only. **Touches:** the corpus source staging dir.
+
 ```mermaid
 flowchart LR
     CF[sc corpusfetch] --> RG["read the staged generator's<br/>package registry"]
@@ -207,6 +231,8 @@ flowchart LR
 ### `sc corpus`
 
 Submits the corpus-factory job that harvests the prefetched packages into verified training records — after checking every precondition login-side.
+
+**Cost:** one CPU-partition job (no GPUs). **Touches:** the corpus output file, append-only.
 
 ```mermaid
 flowchart TB
@@ -219,6 +245,8 @@ flowchart TB
 
 Re-derives a lost keeper checkpoint by retraining its recorded recipe. The result is a new sample of that recipe, judged by its own fresh eval.
 
+**Cost:** one full round retrain + eval per keeper — the most expensive recovery verb; use only for checkpoints worth that price. **Touches:** the run dir + retention tier on success.
+
 ```mermaid
 flowchart LR
     KP[sc keep] --> SPEC["look up the run's<br/>recorded chain spec<br/>(recipe: mix, drill, steps, seed)"]
@@ -228,6 +256,9 @@ flowchart LR
 ```
 
 ## Observing (read-only)
+
+All observation verbs are free: login-side reads of the queue, the
+run tree, and accounting — no jobs, no writes.
 
 ### `sc status`
 
@@ -296,6 +327,9 @@ flowchart LR
 
 ## Recovery
 
+Janitors and resume are ~free (CPU-minutes and a file write); the only
+expensive recovery is `keep`, priced above.
+
 ### `sc janitor` · `sc evaljanitor NAME`
 
 The two automatic responders: `janitor` recovers node-fault failures (the only auto-retry class), `evaljanitor` retries a failed eval exactly once before pausing the line.
@@ -318,6 +352,9 @@ flowchart LR
 ```
 
 ## Storage doctrine
+
+All storage verbs are free of compute — filesystem moves, symlinks,
+and deletes; `gc` is dry-run by default and never touches evidence.
 
 ### `sc clean` · `sc archive` · `sc gc [--delete]`
 
