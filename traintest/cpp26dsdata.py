@@ -13,6 +13,7 @@ Every row was oracle-verified by the pipeline before it got here; this
 module adds no unverified text. Set CPP26DS_DIR to point at a different
 checkout or release dir.
 """
+import hashlib
 import json
 import os
 import random
@@ -41,6 +42,44 @@ MIX = tuple(int(x) for x in
 # internal ratio is load-bearing too. Excess drills are subsampled
 # deterministically; their mutations follow their bases.
 DRILL_SHARE = float(os.environ.get("CPP26DS_DRILL_SHARE", "0.45"))
+
+# FORMAT BANK (forge eval of v61s2, 2026-08-23: 5/10 on bare C++26
+# probes but 0 on EVERY realistically-shaped file-based prompt — C++17
+# polyglot, C, C++98 — while the same asks phrased bare succeed. The
+# constant wrapper "Only output the code." on five bands became the
+# retrieval key; general ability is in the weights, the prompt shape
+# gates access). The namebank doctrine applied to the instruction
+# surface: wrapper drawn deterministically per record id from a bank of
+# realistic shapes, and the TARGET STANDARD IS NAMED (Henri 2026-08-23:
+# "standard should be in prompt" — C++23 scoring UNDER C++26 was the
+# fingerprint of a model never told which standard it is writing).
+FORMAT_BANK = os.environ.get("CPP26DS_FORMAT_BANK", "1") != "0"
+_FMT_SEED = os.environ.get("CPP26DS_FORMAT_SEED", "0")
+_FMTS = [
+    "{p} Only output the code.",
+    "{p}",
+    "{p} Respond with a single fenced code block, nothing else.",
+    "Task: {p}\nTarget: {std}, single translation unit. Code only.",
+    "You are working in a {std} codebase. Implement the following in "
+    "one file:\n{p}\nReply with the complete file contents in a code "
+    "block.",
+    "// TODO: {p}\nWrite the full implementation file ({std}). Output "
+    "only code.",
+    "Issue:\n---\n{p}\n---\nSubmit the complete single-file solution "
+    "as one code block ({std}).",
+    "{p}\nUse {std}. No explanation.",
+    "Implement the following ({std}). Provide the whole program:\n{p}",
+    "Complete this assignment: {p}\nAnswer with just the program "
+    "({std}).",
+]
+
+
+def _wrap(prompt, rid, std="C++26"):
+    if not FORMAT_BANK:
+        return prompt + " Only output the code."
+    i = int(hashlib.sha256(
+        f"{_FMT_SEED}:{rid}".encode()).hexdigest()[:12], 16)
+    return _FMTS[i % len(_FMTS)].format(p=prompt, std=std)
 
 
 def _rows(name):
@@ -79,6 +118,35 @@ _WINNERS = _rows("winners.jsonl")
 _CT = _rows("ct.jsonl")
 IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
 
+# REAL-C imports (Henri 2026-08-23: "especially we need to fix C
+# skills" — forge eval scored file-based C at 0 and the pack carried
+# ZERO C). Compile-verified corpus records from C origins become packed
+# LM text; the C QA side is std_replay below. Point CPP26DS_C_CORPUS at
+# a corpus imported.jsonl (LUMI: $STORAX_ROOT/corpus/var/imported.jsonl;
+# local master: ~/storax-runs/lumi-corpus/imported.jsonl).
+_C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl")
+C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "150"))
+
+
+def _c_imports():
+    p = os.environ.get("CPP26DS_C_CORPUS", "")
+    if not p or not Path(p).exists():
+        return []
+    out = []
+    for ln in Path(p).read_text(encoding="utf-8").splitlines():
+        if not ln.strip():
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        origin = str(r.get("origin", "")).lower()
+        if (r.get("expected") == "ok" and r.get("source")
+                and any(k in origin for k in _C_ORIGINS)
+                and "::" not in r["source"]):
+            out.append(r["source"])
+    return out
+
 _rng = random.Random(SEED)
 _SYNTH_SHUF = _SYNTH[:]
 _rng.shuffle(_SYNTH_SHUF)
@@ -90,13 +158,21 @@ def _fenced(code):
 
 def article_texts():
     """Raw LM text (packed by the trainer): C++26 synth + mixed stream,
-    plus a capped sample of imported STL test sources as baseline."""
+    plus a capped sample of imported STL test sources as baseline, plus
+    real-C corpus imports (orthogonal band — see _c_imports)."""
     imp = _IMPORTED[:]
     _rng2 = random.Random(SEED + 1)
     _rng2.shuffle(imp)
+    cimp = _c_imports()
+    _rng3 = random.Random(SEED + 2)
+    _rng3.shuffle(cimp)
+    if cimp:
+        print(f"real-C imports: {min(len(cimp), C_IMPORT_TEXT_N)} of "
+              f"{len(cimp)} as packed text", flush=True)
     return ([r["source"] for r in _SYNTH_SHUF[:SYNTH_TEXT_N]]
             + [r["source"] for r in _MIXED]
-            + [r["source"] for r in imp[:IMPORTED_TEXT_N]])
+            + [r["source"] for r in imp[:IMPORTED_TEXT_N]]
+            + cimp[:C_IMPORT_TEXT_N])
 
 
 def training_texts():
@@ -106,6 +182,22 @@ def training_texts():
         if g.get("prompt"):
             out.append(g["prompt"])
     return out * 2
+
+
+def _std_replay():
+    """Standard-sweep anchors (gen_std_replay.py): the BASE model answers
+    everyday tasks per standard — C17, C++98/11/17/20 — each verified by
+    the matching gcc/g++ -std= flag, standard named in the prompt at
+    birth. The corpus-side answer to the forge zeros on C and older C++
+    (Henri: 'corpus should be extended, so c++ older revisions work')."""
+    rdir = os.environ.get("TRAINTEST_REPLAY_DIR")
+    f = (Path(rdir) / "std_replay.json") if rdir else \
+        Path(__file__).resolve().parent / "std_replay.json"
+    if not f.exists():
+        print("std_replay.json missing — C / older-C++ anchors absent "
+              "(run gen_std_replay.py)", flush=True)
+        return []
+    return json.loads(f.read_text(encoding="utf-8"))
 
 
 def _cpp_replay():
@@ -182,10 +274,19 @@ def training_qa_pairs():
     # anchors (duplication only for any remaining shortfall).
     new_mass = (len(bases) + len(_TRACES) + SYNTH_QA_N + len(_EDITS)
                 + len(muts) + len(_MIXED) + len(_WINNERS) + len(_CT))
-    base_pool = ([(r["prompt"] + " Only output the code.",
+    # baseline prompts carry a generator-era "C++26 program" phrasing;
+    # the band trains the CURRENT standard — name it truthfully (the
+    # C++23-under-C++26 forge fingerprint is exactly mislabeled-standard
+    # training)
+    base_pool = ([(_wrap(r["prompt"].replace("C++26 program",
+                                             "C++23 program"),
+                         r["id"], "C++23"),
                    _fenced(r["source"])) for r in _BASELINE]
                  + [(r["prompt"], _fenced(r["code"]))
-                    for r in _cpp_replay()])
+                    for r in _cpp_replay()]
+                 + [(_wrap(r["prompt"], f"std:{i}", r.get("std", "C17")),
+                     _fenced(r["code"]))
+                    for i, r in enumerate(_std_replay())])
     if base_pool:
         target = max(1, int(new_mass * MIX[1] / MIX[0]))
         reps = max(1, round(target / len(base_pool)))
@@ -208,20 +309,18 @@ def training_qa_pairs():
                 "code.\n\n```cpp\n" + g["bad"].strip() + "\n```",
                 _fenced(g["source"])))
     for r in bases:
-        out.append((r["prompt"] + " Only output the code.",
-                    _fenced(r["source"])))
+        out.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
     for r in _TRACES:
-        out.append((r["prompt"] + " Only output the code.",
+        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
                     _fenced(r["source"])))
     for r in _WINNERS:
-        out.append((r["prompt"] + " Only output the code.",
+        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
                     _fenced(r["source"])))
     for r in _CT:
-        out.append((r["prompt"] + " Only output the code.",
+        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
                     _fenced(r["source"])))
     for r in _SYNTH_SHUF[SYNTH_TEXT_N:SYNTH_TEXT_N + SYNTH_QA_N]:
-        out.append((r["prompt"] + " Only output the code.",
-                    _fenced(r["source"])))
+        out.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
     for r in _EDITS:
         out.append((f"{r['instruction']}\n\n```cpp\n{r['base'].strip()}\n```"
                     "\nOnly output the edited code.",
