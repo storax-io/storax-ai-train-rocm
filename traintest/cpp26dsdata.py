@@ -124,7 +124,9 @@ IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
 # LM text; the C QA side is std_replay below. Point CPP26DS_C_CORPUS at
 # a corpus imported.jsonl (LUMI: $STORAX_ROOT/corpus/var/imported.jsonl;
 # local master: ~/storax-runs/lumi-corpus/imported.jsonl).
-_C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl")
+_C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl",
+              "apr", "mbedtls", "c-ares", "jansson", "cjson", "pcre2",
+              "sqlite", "libjpeg", "mimalloc")
 C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "400"))
 
 
@@ -140,9 +142,13 @@ def _c_imports():
             r = json.loads(ln)
         except ValueError:
             continue
+        # authoritative: the lang tag stamped since the C-front-end fix;
+        # origin allowlist covers records imported before the tag existed
+        lang = r.get("verdicts", {}).get("syntax", {}).get("lang")
         origin = str(r.get("origin", "")).lower()
         if (r.get("expected") == "ok" and r.get("source")
-                and any(k in origin for k in _C_ORIGINS)
+                and (lang == "c" or (lang is None
+                     and any(k in origin for k in _C_ORIGINS)))
                 and "::" not in r["source"]):
             out.append(r["source"])
     return out
