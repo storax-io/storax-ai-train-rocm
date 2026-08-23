@@ -133,6 +133,31 @@ def ids_of(tok, msgs, system=SYSTEM):
         else list(out)
 
 
+def load_extra(path, n, std):
+    """Scale-up prompts: re-address single-fragment baseline-stream
+    instructions to the target standard (the gen_cpp_replay volume
+    mechanism, per-std; different deterministic slice per standard so
+    the standards don't co-train identical task sets). C standards get
+    no extras — baseline tasks are STL-shaped and would only burn
+    generations into the compiler filter."""
+    if not std.startswith("C++"):
+        return []
+    from random import Random
+    stmts = []
+    for ln in Path(path).open():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        pr = r.get("prompt", "")
+        if pr and "C++26 program" in pr \
+                and r.get("source", "").count("  {") == 1:
+            stmts.append(pr)
+    Random(f"stdreplay:{std}").shuffle(stmts)
+    return [p.replace("Write one complete C++26 program",
+                      f"Write a {std} program") for p in stmts[:n]]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -140,6 +165,10 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--attn", default="sdpa")
+    ap.add_argument("--tasks-file", default=None,
+                    help="baseline-stream jsonl to mine extra prompts from")
+    ap.add_argument("--extra", type=int, default=0,
+                    help="extra prompts per C++ standard from --tasks-file")
     args = ap.parse_args()
 
     import torch
@@ -207,6 +236,12 @@ def main():
     kept, rejected = [], 0
     for std, compiler, stdflag, suffix, tasks in STDS:
         prompts = [f"Write a {std} program that {t}." for t in tasks]
+        if args.tasks_file and args.extra:
+            extra = load_extra(args.tasks_file, args.extra, std)
+            if extra:
+                print(f"{std}: +{len(extra)} baseline-mined prompts",
+                      flush=True)
+            prompts += extra
         gens = gen(prompts)
         n0 = len(kept)
         for prompt, (text, truncated) in zip(prompts, gens):
