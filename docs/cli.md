@@ -1,145 +1,145 @@
-# Harness CLI reference — every tool as a flowchart
+# `sc` — the campaign CLI (usage reference)
 
-The harness is a set of standalone entry points, not a monolith:
-`traintest/*.py` are the training-loop verbs, `tools/*.py` the
-gate/triage/ops verbs, `scripts/*.sh` the runners. On LUMI these are
-orchestrated by `sc`, the campaign-front CLI in the (private) ops
-repo — it submits them as plain Slurm jobs chained via `afterok`, with
-janitors on `afternotok`, no daemons; that layer is documented where it
-lives. This page documents the tools themselves — they run identically
-under the local runners and inside the container.
+`sc` is how the storax training campaign is operated on the
+supercomputer: one command turns an intent — "run this generation",
+"judge every checkpoint", "train 1B tokens as a segment chain" — into
+a Slurm job chain. **Closed source, open usage**: the implementation is
+private; this page documents the command surface and its semantics.
 
-How the tools compose into one round of the storax loop:
-
-```mermaid
-flowchart LR
-    TP["trainpack<br/>(dataset repo, versioned)"] --> TR[train.py]
-    RG["gen_replay / gen_cpp_replay /<br/>gen_std_replay<br/>(model-native anchors)"] --> TR
-    SH["stage-harness.sh<br/>(committed-tree snapshot,<br/>HARNESS_COMMIT stamped)"] -.-> TR
-    TR --> CK[checkpoint]
-    CK --> VA[validate_ckpt.py] --> EV["oracle_eval.py<br/>(sharded, --shard I/M)"]
-    EV --> ME[merge_eval.py] --> RPT["gen_report.py /<br/>strata_report.py / error_clusters.py"]
-    CK --> GS["make_guard_suite.py<br/>-> oracle_eval on guard suite"]
-    RPT -. "coverage + drill targets" .-> TP
-    CK --> HV[harvest.py] -. "winners band" .-> TP
-```
-
-Local runners: `scripts/run_linux.sh <script.py>` (WSL ROCm venv — the
-local twin of the LUMI container), `scripts/run_win.sh` (Windows venv,
-syncs to C: staging first), `scripts/stage-harness.sh` (committed-tree
-snapshot via `git archive`, HARNESS_COMMIT stamped — a dirty tree
-cannot leak).
-
-### `train.py --data cpp26ds --out DIR` — one round
+Design rules that hold for every verb: everything submitted is a plain
+Slurm job — chains via `afterok`, failure janitors via `afternotok`,
+**no daemons, no cron**. Errors pause the line; hardware faults
+self-heal; nothing burns to a time cap. Every submit verb is
+**idempotent** — re-running the same command resumes or converges
+instead of duplicating work. The jobs themselves execute the
+open-source harness tools in this repo ([tools.md](tools.md)).
 
 ```mermaid
 flowchart TB
-    IN["--model base + --data provider<br/>(cpp26ds: bands, caps, MIX —<br/>see architecture.md corpus-intake)"] --> MB["fixed batch shapes<br/>(--batch/--accum/--seq-len;<br/>ragged batches cost 16x on ROCm)"]
-    MB --> ST["bf16 + Adafactor + grad ckpt<br/>warmup + linear LR decay to 0"]
-    ST --> SYNC{"multi-GPU?"}
-    SYNC -- "--grad-sync manual" --> AR["in-place all-reduce at<br/>accumulation boundaries<br/>(DDP cannot fit a 14B on 64GB)"]
-    ST --> LG["metrics.jsonl per step"]
-    LG --> AB{"sustained loss <= 1e-3?"}
-    AB -- yes --> KILL["scripted ABORT —<br/>memorization depth breaks<br/>guards and repair"]
-    ST --> OUT["--out: model (--save-model),<br/>result.json (tok/s, peak VRAM),<br/>optional midsaves + resumable state"]
+    subgraph gate["every submission passes"]
+        PZ{"line paused?"} -- yes --> DIE["refuse: review,<br/>then sc resume"]
+        PZ -- no --> WX{"fresh weather<br/>verdict bad?"}
+        WX -- "storage dark<br/>< 15 min ago" --> DIE2["WEATHER HOLD<br/>(billed nodes never<br/>probe out a storm)"]
+        WX -- clear/stale --> OKG[submit]
+    end
+    subgraph submitters["submit verbs"]
+        S1["gen / rounds / eval / sweep"]
+        S2["consolidate / campaign / reconcile"]
+        S3["harvest / bench / replay / keep"]
+        S4["corpus / corpusfetch"]
+    end
+    subgraph observers["observe verbs (read-only)"]
+        O1["status / status-all / health /<br/>jobstate / report / quota /<br/>weather / watch"]
+    end
+    subgraph maint["recover + storage"]
+        M1["janitor / evaljanitor / resume"]
+        M2["clean / archive / gc"]
+    end
+    submitters --> gate --> Q[("Slurm queue<br/>afterok chains")]
 ```
 
-Key flags: `--total-steps` (LR schedule truth for multi-segment runs),
-`--resume-state/--save-state`, `--freeze`, `--seed` (≥3 seeds per
-config), `--min-free-vram` (refuses a busy card). **Data providers**
-(`--data` plugins, not commands): `cpp26dsdata.py` (bands/caps/MIX),
-`cpp26data.py` (earlier corpus provider), `facts.py` (phase-0);
-`hfcompat.py` is the transformers 4/5 chat-template shim under all of
-them.
+## Launching training
 
-### Replay generators — the model-native anchors
+### `sc preflight` · `sc gen MANIFEST` · `sc rounds GEN ROUND MIX DRILL STEPS SEED…`
 
 ```mermaid
 flowchart LR
-    B["BASE model answers<br/>everyday prompts"] --> V{verify}
-    V -- "gen_replay: none<br/>(chat style anchor)" --> R1["replay.json (10% band)"]
-    V -- "gen_cpp_replay:<br/>oracle compile+run" --> R2["cpp_replay.json<br/>(plain modern C++)"]
-    V -- "gen_std_replay:<br/>gcc/g++ with the MATCHING<br/>-std= flag, per standard" --> R3["std_replay.json<br/>(C17, C++98/11/17/20 —<br/>standard named in the prompt)"]
+    MF["manifest rows:<br/>gen round mix drill seed steps"] --> PF["preflight (no cost):<br/>verify code + data vs<br/>the sync manifest"]
+    PF --> RJ["round job per row"]
+    RJ -- afternotok --> JN["janitor job<br/>(node faults only:<br/>retry + exclude list)"]
+    RJ -- afterok --> EV["WIDE eval — own node,<br/>8-way sharded, ~10 min<br/>(EVAL SLO: no verdict<br/>layer runs an hour)"]
+    EV -- afternotok --> EJ["evaljanitor: retry ONCE<br/>(shard-resume reuses work);<br/>second failure -> pause"]
 ```
 
-**Model-native replay only** — anchors come from the model being
-trained, never a teacher. On LUMI the first of these runs at scale as the retention-band job.
+`gen` reads a manifest (one row per round: generation, round name, mix,
+drill share, seed, steps) and queues the whole generation — rounds,
+per-round wide evals, janitors — then it is safe to log out. `rounds`
+is the single-recipe form for a list of seeds.
 
-### `oracle_eval.py --model M --suite S.jsonl` — the verdict layer
+### `sc consolidate NAME MIX DRILL SEED [MTOK]` — segment-chain training
 
 ```mermaid
 flowchart TB
-    SU["suite JSONL {id, prompt}<br/>(--limit, --shard I/M)"] --> G["greedy generation<br/>(--backend hf|vllm, --max-new)"]
-    G --> X["extract first ```-fenced block<br/>(whole output if none)"]
-    X --> O{"oracle compile<br/>(--run: also execute)"}
-    O -- pass --> SC2[scored pass]
-    O -- fail --> RP{"--repair N left?"}
-    RP -- yes --> M2["repair prompt with the REAL<br/>compiler output -> regenerate"] --> O
-    RP -- no --> SF[scored fail]
-    SC2 & SF --> RJ2["result JSON: rate, per-task<br/>verdicts + diagnostics"]
-    TRC["--rerun-truncated PREV:<br/>redo only truncated tasks,<br/>merge by id"] -.-> G
+    LAD["width ladder (e.g. 8->16->32->64 nodes,<br/>custom via --ladder n:mtok,…)<br/>one LR schedule across segments"] --> SEGS["afterok segment chain<br/>(+1 spare node per segment: a sick<br/>node idles instead of killing the run)"]
+    SEGS --> IDEM{"segment state<br/>already on disk?"}
+    IDEM -- yes --> SKIP["skipped — re-running the<br/>same command IS the<br/>hang/failure recovery"]
+    IDEM -- "mid-checkpoint" --> MID["resume from the segment's<br/>mid-checkpoint"]
+    SEGS --> CEVAL["per-segment evals run<br/>CONCURRENTLY on their own nodes —<br/>the chain never waits on a verdict"]
+    CEVAL --> CONV["converge director (tiny CPU job):<br/>seg-over-seg gain < --improve-min<br/>-> cancel the still-PENDING tail.<br/>The plateau is the cutoff, not the<br/>token plan. A missing eval<br/>cancels NOTHING."]
+    CTRL["--controlled: submit only the next<br/>segment; each director computes<br/>family weights from its eval and<br/>extends the chain itself"] -.-> SEGS
+    FORK["--from DIR: fork any validated<br/>checkpoint into a parallel branch"] -.-> SEGS
 ```
 
-`merge_eval.py merged.json shard*.json` recombines shards (later files
-win, matching oracle_eval's own rerun-merge semantics). This is the judge behind every sharded eval on LUMI.
-
-### `harvest.py` — expert iteration
-
-Best-of-N sampling on fresh prompts; the oracle keeps winners →
-`winners.jsonl` → the next trainpack's expert band. The model teaches
-itself whatever it can already sample but not yet rank first.
-
-### Gates
+### `sc campaign PLAN.json` · `sc reconcile` — unattended multi-stage arcs
 
 ```mermaid
-flowchart LR
-    subgraph vc["tools/validate_ckpt.py"]
-        PR["producer: sha256 every shipped<br/>file + tensor spot-checks<br/>-> validation.json"] --> CO["consumer: re-hash before<br/>resume/eval; mismatch = refuse<br/>(five attempts burned ~250 GPU-h<br/>on a corrupt resume source)"]
-    end
-    subgraph ma["tools/model_acid.py (any host, stdlib+transformers)"]
-        A1["A1 tokenizer decode trap"] & A2["A2 chat-template injection"] & A3["A3 config/weights inventory"] & B1["B generation battery<br/>(collapse signatures)"] --> V2["ACID verdict, exit 1 = FAIL"]
-    end
+flowchart TB
+    PL["plan: JSON stage list<br/>(gen | consolidate | replay | sweep),<br/>each with an artifact gate"] --> ST["submit stage i"]
+    ST --> DIR["director (tiny CPU job,<br/>afterany on the stage's<br/>terminal jobs)"]
+    DIR --> GATE{"gate on artifacts:<br/>any (rate, guard, medtok)<br/>candidate passes?"}
+    GATE -- pass --> NEXT["submit stage i+1"]
+    GATE -- fail --> PAU["pause with the reason"]
+    REC["sc reconcile — THE recovery verb.<br/>Level-triggered: observe desired (plan)<br/>vs actual (run tree + queue), submit<br/>exactly what's missing, idempotently.<br/>INFRA gap -> resubmit (retry budget);<br/>VERDICT failure -> pause for review.<br/>Safe at any moment, from any trigger."] -.-> GATE
 ```
 
-`tools/make_guard_suite.py` builds the retention-guard suite from
-`cpp_replay.json` — tasks the base model provably answered; the guard
-is a **hard filter** at 0.9 regardless of suite rate.
+Campaign state is keyed to the plan (a new plan starts at stage 0); a
+stale director continuation is ignored. `reconcile` replaced the whole
+resume/reset/continue decision tree: decisions come from observed
+state, never from which event fired.
 
-### Reports and triage
+## Judging
 
-```mermaid
-flowchart LR
-    EJ["eval JSONs + metrics.jsonl"] --> GR["gen_report.py — the DECISION<br/>CONTRACT: seeds, mean/min-max/sigma,<br/>guard-min, first-shot vs repaired"]
-    EJ --> LC["learning_curve.py — one row<br/>per generation, campaign headline"]
-    EJ --> UP["user_pain.py — the eval as 128<br/>users: wall-clock felt per verdict"]
-    EJ --> N["strata_report.py / error_clusters.py<br/>normalized error signature x family<br/>-> ranked actionables"]
-    N -.-> GEN2["next trainpack (each generation<br/>peels one failure layer)"]
-    LOOP["tools/cpp26_loop.py — local dynamic<br/>rounds: train -> probe -> add verified<br/>remedials for the error CLASS -> retrain"] ~~~ EJ
-```
+### `sc eval RUNDIR…` · `sc sweep [--dense]` · `sc bench TAG --model M --suite S`
 
-### Probes and environment (run before anything expensive)
-
-| tool | one line |
+| verb | semantics |
 |---|---|
-| `traintest/env_probe.py` | ROCm/PyTorch env probe, one JSON, never raises — failures are diagnoses |
-| `traintest/triton_probe.py` | compile+run real Triton kernels, numerics vs eager — the Instinct-pathfinding test |
-| `traintest/impcheck.py` | surface the real exception behind transformers' lazy-import wrapper |
-| `traintest/download.py` | pre-fetch a model into the HF cache |
-| `traintest/chat.py` | interactive GPU REPL (`/think`, `/temp`, `/clear`) |
-| `traintest/chatprobe.py` | scripted chat probes: general-chat drift, base vs tuned |
-| `traintest/thinkprobe.py` | thinking-mode template mechanics + natural trace length |
-| `tools/gpu_acceptance.py` | GPU acceptance: VRAM pattern-fill integrity + sustained bf16 burst |
-| `tools/node_probe.py` | per-node health: alloc+GEMM+sync every GCD + filesystem touch — a wedged GPU fails in seconds, not mid-round |
-| `tools/estimate.py` | project measured MFU to other GPUs/model sizes |
+| `eval` | wide eval per checkpoint: one node, sharded across its 8 GPUs, ~10 min — same GPU-h as dense, ~8× less wall-clock, small jobs backfill well |
+| `sweep` | find every checkpoint with a model but no verdict and submit wide evals for all of them; `--dense` packs 8 per node with a short generation cap — a truncation at the cap *is* the verdict "broken" |
+| `bench` | any model × any suite through the same judge with the same repair semantics; foreign models skip the retention guard |
 
-### Phase-0 lineage (kept for the de-risking story)
+## Data verbs
 
-`evaluate.py` (string-keyed facts QA), `tools/build_dataset.py`
-(Wikipedia → facts corpus), `tools/build_cpp26_corpus.py` (first
-oracle-verified C++26 corpus builder; superseded by the dataset repo).
+| verb | semantics |
+|---|---|
+| `sc replay [COUNT]` | regenerate the retention band at scale: base-model answers to training-shaped plain-C++ prompts, compiler-verified — run before the first consolidation |
+| `sc harvest TAG` | expert-iteration burst: N independent single-node jobs, best-of-N sampling on FRESH prompts (never the eval suite), the oracle keeps verified winners; fleet-of-ones queues well; re-run to resume unfinished shards |
+| `sc corpusfetch` | login-side prefetch (compute nodes have no internet): shallow-clone every registry package for the corpus factory |
+| `sc corpus` | submit the corpus-factory job — **all** preconditions checked login-side before a single core-hour is queued |
+
+## Observing
+
+| verb | one line |
+|---|---|
+| `sc status` | bottom-up terminal order: latest rates and 24h burn scroll away, failures sit second-to-last, RUNNING lands at the prompt; plus eval gaps, excluded nodes, campaign stage, storage weather |
+| `sc status-all` | status + a process-level look inside every running job |
+| `sc health` | probe running jobs for hangs |
+| `sc jobstate JOBID` | peek inside one job: metrics tail, eval slot states, GPU busy |
+| `sc report GEN [REF] [PREV]` | the generation decision contract: seeds, suite mean/min–max/σ, guard-min, first-shot vs repaired |
+| `sc quota` | billing units, storage on both tiers, node ceilings, idle counts, start estimates for burst shapes — read-only |
+| `sc weatherprobe` | background storage-weather probe (scheduled ~5 min); submissions consult the stored verdict instead of discovering the weather on a paid allocation |
+| `sc weather` | stall-recurrence grid by hour-of-day, mined from our own job telemetry — the shared-filesystem schedule emerges from normal operation |
+| `sc watch` | finite collection loop: drain → sweep gaps → drain → report; run detached via `sc bg watch …` |
+| `sc bg VERB…` | re-exec any verb detached (survives logout) |
+
+## Recovery and storage
+
+```mermaid
+flowchart LR
+    F{failure} -- "node fault<br/>(the only auto-retry)" --> J["janitor: resubmit +<br/>exclude list; faulty nodes<br/>REPORTED upstream,<br/>not just excluded"]
+    F -- "anything else" --> P["line pause: queued jobs no-op,<br/>submissions refuse —<br/>errors are information"]
+    P --> HR["human review"] --> RS["sc resume: clear the pause,<br/>list unjudged checkpoints"]
+```
+
+| verb | semantics |
+|---|---|
+| `sc clean` | enforce the storage doctrine: working tier holds records + in-flight checkpoints, retention tier holds evaluated ones — retire (symlink back), delete salvage debris, fold strays home |
+| `sc archive` | push superseded artifacts to the retention tier (sealed segments' predecessors, judged round checkpoints); symlinks left; idempotent |
+| `sc gc [--delete]` | weights of superseded runs are disposable; the scientific record (evals, metrics, manifests, validations) is always kept; dry-run by default |
+| `sc keep GEN/ROUND-sSEED…` | re-derive lost keeper checkpoints from their chain specs — honestly: runs are not bit-deterministic, a re-derived keeper is a NEW SAMPLE and its fresh eval decides its worth |
 
 ---
 
-Dataset-side commands (`cpp26ds …`: drillgen, synthgen,
-harvest-packages, trainpack, …) live in the dataset repo — flowcharts
-in [storax-dataset-cpp26 docs/cli.md](https://github.com/storax-io/storax-dataset-cpp26/blob/main/docs/cli.md).
+Inside the jobs: the open-source harness tools in this repo —
+flowcharts in [tools.md](tools.md). Dataset-side commands (`cpp26ds`:
+drillgen, synthgen, harvest-packages, trainpack, …):
+[storax-dataset-cpp26 docs/cli.md](https://github.com/storax-io/storax-dataset-cpp26/blob/main/docs/cli.md).
