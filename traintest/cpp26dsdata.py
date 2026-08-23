@@ -287,12 +287,25 @@ def training_qa_pairs():
                  + [(_wrap(r["prompt"], f"std:{i}", r.get("std", "C17")),
                      _fenced(r["code"]))
                     for i, r in enumerate(_std_replay())])
+    # MIX enforcement, TWO-SIDED and supply-honest (Henri 2026-08-23:
+    # "if the model degrades in normal c/c++ its not worth anything —
+    # 5% reflection, 95% traditional"). Duplicating baseline to reach a
+    # big MIX[1] is a byte-epoch bomb (E* law: repetition is the
+    # collapse currency), so duplication is capped and the REFLECTION
+    # side is subsampled down to honor the ratio instead — the pack
+    # shrinks rather than lies. Realized mix is printed either way.
+    allowed_new = None
     if base_pool:
         target = max(1, int(new_mass * MIX[1] / MIX[0]))
-        reps = max(1, round(target / len(base_pool)))
+        reps_cap = int(os.environ.get("CPP26DS_BASELINE_MAX_REPS", "3"))
+        reps = min(max(1, round(target / len(base_pool))), reps_cap)
+        traditional = len(base_pool) * reps
+        if MIX[1] and traditional < target:
+            allowed_new = max(1, int(traditional * MIX[0] / MIX[1]))
         print(f"mix: c++26={new_mass} baseline_target={target} "
-              f"({len(base_pool)} unique x{reps}); general share is "
-              f"replay.json in train.py", flush=True)
+              f"({len(base_pool)} unique x{reps}, cap {reps_cap}) "
+              f"realized_new={allowed_new if allowed_new else new_mass}; "
+              f"general share is replay.json in train.py", flush=True)
         for _ in range(reps):
             out.extend(base_pool)
 
@@ -308,32 +321,42 @@ def training_qa_pairs():
                 + "\nRewrite it to conform. Only output the corrected "
                 "code.\n\n```cpp\n" + g["bad"].strip() + "\n```",
                 _fenced(g["source"])))
+    new_qa = []
     for r in bases:
-        out.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
+        new_qa.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
     for r in _TRACES:
-        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
-                    _fenced(r["source"])))
+        new_qa.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
+                       _fenced(r["source"])))
     for r in _WINNERS:
-        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
-                    _fenced(r["source"])))
+        new_qa.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
+                       _fenced(r["source"])))
     for r in _CT:
-        out.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
-                    _fenced(r["source"])))
+        new_qa.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
+                       _fenced(r["source"])))
     for r in _SYNTH_SHUF[SYNTH_TEXT_N:SYNTH_TEXT_N + SYNTH_QA_N]:
-        out.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
+        new_qa.append((_wrap(r["prompt"], r["id"]), _fenced(r["source"])))
     for r in _EDITS:
-        out.append((f"{r['instruction']}\n\n```cpp\n{r['base'].strip()}\n```"
-                    "\nOnly output the edited code.",
-                    _fenced(r["edited"])))
+        new_qa.append((f"{r['instruction']}\n\n```cpp\n{r['base'].strip()}"
+                       "\n```\nOnly output the edited code.",
+                       _fenced(r["edited"])))
     # Repair pairs in the exact message format oracle_eval --repair sends.
     for r in muts:
         stderr = "\n".join(r.get("diagnostics") or [])[:800]
         fixed = _BASES[r["base_id"]]["source"]
-        out.append((
+        new_qa.append((
             "That does not compile. Compiler output:\n" + stderr
             + "\nFix the program. Only output the corrected code.\n\n"
             + "The program was:\n" + _fenced(r["source"]),
             _fenced(fixed)))
+    if allowed_new is not None and len(new_qa) > allowed_new:
+        new_qa = [p for i, p in enumerate(new_qa)
+                  if int(hashlib.sha256(f"mix:{i}".encode())
+                         .hexdigest()[:8], 16) % len(new_qa) < allowed_new]
+    n_trad = len(out)
+    print(f"realized mix: new-QA {len(new_qa)} / traditional {n_trad} "
+          f"({100 * len(new_qa) / max(1, len(new_qa) + n_trad):.1f}% "
+          f"reflection)", flush=True)
+    out.extend(new_qa)
     return out
 
 
