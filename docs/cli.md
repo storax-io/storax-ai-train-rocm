@@ -66,7 +66,12 @@ flowchart LR
 
 ### `sc consolidate NAME MIX DRILL SEED [MTOK]`
 
-Trains a large token budget as an idempotent chain of Slurm segments sharing one LR schedule, widening across a node ladder, with concurrent per-segment evals and automatic plateau cutoff. Re-running the same command is the recovery procedure.
+Trains a large token budget as an idempotent chain of Slurm segments
+sharing one LR schedule, widening across a node ladder, with concurrent
+per-segment evals and automatic plateau cutoff. Re-running the same
+command is the recovery procedure — completed segments are detected on
+disk and skipped, so a re-run only ever spends the *remaining* token
+budget, and the plateau cutoff can shrink even that.
 
 ```mermaid
 flowchart TB
@@ -98,7 +103,12 @@ flowchart TB
 
 ### `sc reconcile [--plan P]`
 
-Converges reality toward the plan: observes what exists (run tree, queue) versus what should, and submits exactly what is missing. The single recovery verb after any interruption or confusion.
+Converges reality toward the plan: observes what exists (run tree,
+queue) versus what should, and submits **exactly what is missing —
+never what already exists**. The single recovery verb after any
+interruption or confusion. Reconcile itself is free (login-side,
+read-only); any GPU cost you see afterwards is the *unfinished
+remainder of the original plan* resuming, not work being redone.
 
 ```mermaid
 flowchart TB
@@ -109,7 +119,7 @@ flowchart TB
     D -- "gate passes" --> NXT[next stage]
     D -- "jobs in flight" --> WAIT["wait — never race live work"]
     D -- "trained, unjudged" --> SE["submit the missing eval<br/>(retry budget 3)"]
-    D -- "segments incomplete" --> SC2["re-run the consolidate<br/>(idempotent resume, budget 3)"]
+    D -- "segments incomplete" --> SC2["resume the consolidate:<br/>finished segments SKIPPED,<br/>only the remaining Mtok train —<br/>cost = the plan's unspent part,<br/>nothing is redone (budget 3)"]
     D -- "judged and still failing" --> PV["VERDICT failure -><br/>pause for review"]
 ```
 
