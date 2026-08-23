@@ -154,6 +154,16 @@ def main():
     kw = dict(dtype=torch.bfloat16, attn_implementation=args.attn)
     if args.device == "auto":
         kw["device_map"] = "auto"
+        # plan around co-tenant processes: cap each GPU at its ACTUAL
+        # free VRAM minus a 2 GiB generation/fragmentation reserve
+        # (device_map alone OOMed loading next to a 19 GiB server)
+        kw["max_memory"] = {
+            i: max(0, torch.cuda.mem_get_info(i)[0] - 2 * 2**30)
+            for i in range(torch.cuda.device_count())}
+        kw["max_memory"]["cpu"] = 64 * 2**30
+        print("max_memory plan:", {k: f"{v/2**30:.1f}GiB" if isinstance(v, int)
+                                   else v for k, v in kw["max_memory"].items()},
+              flush=True)
     from transformers import AutoModelForCausalLM
     try:
         model = AutoModelForCausalLM.from_pretrained(args.model, **kw)
