@@ -125,7 +125,7 @@ IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
 # a corpus imported.jsonl (LUMI: $STORAX_ROOT/corpus/var/imported.jsonl;
 # local master: ~/storax-runs/lumi-corpus/imported.jsonl).
 _C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl")
-C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "150"))
+C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "400"))
 
 
 def _c_imports():
