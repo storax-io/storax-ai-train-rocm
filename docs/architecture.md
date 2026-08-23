@@ -128,6 +128,78 @@ These knobs — mixture ratios, drill share, seed — are exactly the axes
 the population search sweeps: every training round records its values,
 and generations move the priors only on multi-seed evidence.
 
+## Corpus intake: bands and the anti-imprinting caps
+
+The `--data cpp26ds` provider (`traintest/cpp26dsdata.py`) turns the
+generator's verified streams into the two things the trainer consumes —
+packed LM text and instruction QA — applying the orthogonality doctrine
+at exactly this boundary: **harvest is uncapped, sampling is governed.**
+
+```mermaid
+flowchart TB
+    subgraph streams["generator streams (all oracle-verified)"]
+        SY["synth / mixed"]
+        BL["synth-baseline (C++23)"]
+        L0["level0 drills + fail-mutations"]
+        IM["imported.jsonl<br/>STL tests + real-corpus packages"]
+        WN["winners + ct<br/>(behavior-verified harvest)"]
+        GD["guidelines"]
+        ED["edits"]
+    end
+    subgraph anchors["model-native anchors"]
+        CR["cpp_replay.json (plain modern C++)"]
+        SR["std_replay.json (C17, C++98/11/17/20,<br/>each verified under its own -std=,<br/>standard NAMED in the prompt)"]
+    end
+    IM --> CCAP["real-C band: byte-dedup +<br/>per-source share cap 0.25<br/>(D'Hondt apportionment — musl at 69%<br/>of supply enters the 400-band at 100)"]
+    SY & CCAP --> TXT["packed LM text"]
+    L0 --> DCAP["drill share cap 0.45<br/>within the new pool<br/>+ closed-loop family weights"]
+    DCAP & WN & ED & GD --> NEWQA["new-capability QA"]
+    BL & CR & SR --> TRAD["traditional QA<br/>(prompts re-wrapped by the FORMAT BANK:<br/>realistic shapes, target standard named)"]
+    NEWQA & TRAD --> MIX{"two-sided supply-honest MIX:<br/>baseline duplication capped (x3),<br/>reflection side subsampled to honor<br/>the ratio — the pack shrinks<br/>rather than lies"}
+    MIX --> TR2["trainer<br/>(general-chat replay is train.py's 10%)"]
+```
+
+Every cap in that graph was bought with a measured failure: drill share
+(composition regressions, twice), baseline duplication (repetition is
+the byte-epoch collapse currency), the format bank (constant wrapper
+became the retrieval key: 5/10 on bare prompts, 0/10 on realistically
+shaped ones), naming the standard (C++23-under-C++26 scoring was the
+fingerprint of a model never told what it was writing), and the source
+cap (one codebase's style correlating with everything is corpus-level
+imprinting).
+
+## Fleet topology (where things run)
+
+```mermaid
+flowchart LR
+    DEV["local dev (WSL)<br/>repos, commits"] -- "git push" --> GH[("GitHub<br/>canonical remotes")]
+    DEV -- "scp changed files<br/>(virre checkouts are deploys,<br/>not clones)" --> V
+    subgraph V["virre — corpus master + suite host"]
+        CM["~/storax-dataset-cpp26<br/>var/imported.jsonl (THE corpus)<br/>var/pkg checkouts · ops/ · var/logs"]
+        OC2["gxx-oracle container :8950<br/>g++16.1 + gcc, complete headers"]
+        FG["forge gateway :8091<br/>(base-model eval serving)"]
+        RM2["resource manager :8100"]
+    end
+    subgraph K["kvm"]
+        ORC["orchestrator :8000"]
+        MCP["reference-mcp :8930"]
+        GRAF["grafana + telemetry"]
+    end
+    CM <--> OC2
+    CM -- "trainpack (versioned,<br/>manifested — the only<br/>sanctioned transfer)" --> L
+    subgraph L["LUMI-G"]
+        TRN["training bursts<br/>(run.sh chains, oracle sidecar<br/>per node)"]
+    end
+    ORC <--> MCP
+    ORC -.-> FG
+```
+
+The corpus master on virre is a single point of failure (off-machine
+backup is an open ops item — grant storage is project-scoped, never the
+master). Intake mechanics: [storax-dataset-cpp26
+docs/harvest.md](../../storax-dataset-cpp26/docs/harvest.md); CLI
+flowcharts: [docs/cli.md](../../storax-dataset-cpp26/docs/cli.md).
+
 ## Training topology (LUMI-G, measured)
 
 ```mermaid
