@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from pathlib import Path
 
 SEED = 0
@@ -128,13 +129,30 @@ _C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl",
               "apr", "mbedtls", "c-ares", "jansson", "cjson", "pcre2",
               "sqlite", "libjpeg", "mimalloc")
 C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "400"))
+# SOURCE CAP (methodology-math §7b: "no project/org exceeds a fixed band
+# share — one codebase's style correlating with everything is the
+# corpus-level imprinting failure"). Harvest stays uncapped (musl is 69%
+# of C supply and that is fine); orthogonality is enforced HERE, at
+# pack-build sampling: no origin exceeds this share of the realized band.
+C_SOURCE_SHARE_CAP = float(os.environ.get("CPP26DS_SOURCE_SHARE_CAP",
+                                          "0.25"))
+
+
+def _origin_key(origin):
+    for k in _C_ORIGINS:
+        if k in origin:
+            return k
+    # post-allowlist origins arrive via the lang tag with dict-shaped
+    # origin fields ({'corpus': 'pkg-lwip', ...}) — pull the corpus name
+    m = re.search(r"corpus['\"]?\s*[:=]\s*['\"]([\w.+-]+)", origin)
+    return m.group(1) if m else (origin[:24] or "unknown")
 
 
 def _c_imports():
     p = os.environ.get("CPP26DS_C_CORPUS", "")
     if not p or not Path(p).exists():
         return []
-    out = []
+    by_origin, seen = {}, set()
     for ln in Path(p).read_text(encoding="utf-8").splitlines():
         if not ln.strip():
             continue
@@ -150,7 +168,38 @@ def _c_imports():
                 and (lang == "c" or (lang is None
                      and any(k in origin for k in _C_ORIGINS)))
                 and "::" not in r["source"]):
-            out.append(r["source"])
+            src = r["source"]
+            h = hashlib.sha256(src.encode()).hexdigest()
+            if h in seen:       # duplicate bytes are E* currency
+                continue
+            seen.add(h)
+            by_origin.setdefault(_origin_key(origin), []).append(src)
+    if not by_origin:
+        return []
+    supply = sum(len(v) for v in by_origin.values())
+    per_cap = max(1, int(round(C_SOURCE_SHARE_CAP * C_IMPORT_TEXT_N)))
+    rng = random.Random(SEED + 2)
+    for srcs in by_origin.values():
+        rng.shuffle(srcs)
+    # supply-proportional apportionment clipped at the cap (D'Hondt:
+    # each slot goes to the origin maximizing supply/(taken+1)) — the
+    # band mirrors the harvest EXCEPT no origin passes the share cap
+    kept = {k: 0 for k in by_origin}
+    for _ in range(min(C_IMPORT_TEXT_N, supply)):
+        best = max((k for k in sorted(by_origin)
+                    if kept[k] < min(per_cap, len(by_origin[k]))),
+                   key=lambda k: len(by_origin[k]) / (kept[k] + 1),
+                   default=None)
+        if best is None:
+            break
+        kept[best] += 1
+    out = [s for k in sorted(by_origin)
+           for s in by_origin[k][:kept[k]]]
+    top = ", ".join(f"{k}={kept[k]}/{len(by_origin[k])}" for k in
+                    sorted(kept, key=lambda k: -kept[k])[:6])
+    print(f"real-C imports: {len(out)} of {supply} deduped as packed text "
+          f"(source cap {C_SOURCE_SHARE_CAP} -> <={per_cap}/origin: {top})",
+          flush=True)
     return out
 
 _rng = random.Random(SEED)
@@ -169,16 +218,13 @@ def article_texts():
     imp = _IMPORTED[:]
     _rng2 = random.Random(SEED + 1)
     _rng2.shuffle(imp)
-    cimp = _c_imports()
-    _rng3 = random.Random(SEED + 2)
+    cimp = _c_imports()      # capped + reported at sampling time
+    _rng3 = random.Random(SEED + 3)
     _rng3.shuffle(cimp)
-    if cimp:
-        print(f"real-C imports: {min(len(cimp), C_IMPORT_TEXT_N)} of "
-              f"{len(cimp)} as packed text", flush=True)
     return ([r["source"] for r in _SYNTH_SHUF[:SYNTH_TEXT_N]]
             + [r["source"] for r in _MIXED]
             + [r["source"] for r in imp[:IMPORTED_TEXT_N]]
-            + cimp[:C_IMPORT_TEXT_N])
+            + cimp)
 
 
 def training_texts():
