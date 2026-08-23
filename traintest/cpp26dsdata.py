@@ -75,16 +75,29 @@ _FMTS = [
 ]
 
 
+# Standard-alias surface (Henri 2026-08-23: the model 'should
+# understand "Modern C" and "Modern C++"' — the vocabulary humans use).
+# Aliases COMBINE with the exact revision, never replace it: the
+# standard stays named at birth; the alias teaches the mapping.
+_STD_ALIAS = {
+    "C17": "modern C (C17)",
+    "C++20": "modern C++ (C++20)",
+    "C++23": "modern C++ (C++23)",
+}
+
+
 def _wrap(prompt, rid, std="C++26"):
     if not FORMAT_BANK:
         return prompt + " Only output the code."
-    i = int(hashlib.sha256(
+    h = int(hashlib.sha256(
         f"{_FMT_SEED}:{rid}".encode()).hexdigest()[:12], 16)
-    out = _FMTS[i % len(_FMTS)].format(p=prompt, std=std)
-    # the standard is named AT BIRTH, always (Henri 2026-08-23): three
-    # bank shapes carry no {std} slot — v7 audit: 87/11,677 prompts
-    # escaped unnamed through them. Append rather than reshape so the
-    # bank's surface diversity survives.
+    if std in _STD_ALIAS and (h >> 40) % 2:
+        std = _STD_ALIAS[std]
+    out = _FMTS[h % len(_FMTS)].format(p=prompt, std=std)
+    # the standard is named AT BIRTH, always: three bank shapes carry no
+    # {std} slot — v7 audit: 87/11,677 prompts escaped unnamed through
+    # them. Append rather than reshape so the bank's surface diversity
+    # survives.
     if std.lower() not in out.lower():
         out += f" Use {std}."
     return out
