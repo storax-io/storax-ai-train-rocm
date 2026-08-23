@@ -149,21 +149,24 @@ def main():
                                             fix_mistral_regex=True)
     except TypeError:
         tok = AutoTokenizer.from_pretrained(args.model)
+    # --device auto = accelerate device_map sharding (fits the bf16 14B
+    # across partially-occupied GPUs); otherwise a single explicit device
+    kw = dict(dtype=torch.bfloat16, attn_implementation=args.attn)
+    if args.device == "auto":
+        kw["device_map"] = "auto"
     from transformers import AutoModelForCausalLM
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, dtype=torch.bfloat16,
-            attn_implementation=args.attn)
+        model = AutoModelForCausalLM.from_pretrained(args.model, **kw)
     except Exception:
         from transformers import AutoModelForImageTextToText
-        model = AutoModelForImageTextToText.from_pretrained(
-            args.model, dtype=torch.bfloat16,
-            attn_implementation=args.attn)
+        model = AutoModelForImageTextToText.from_pretrained(args.model, **kw)
     try:
         model.generation_config.max_length = None
     except Exception:
         pass
-    model = model.to(args.device).eval()
+    model = (model if args.device == "auto"
+             else model.to(args.device)).eval()
+    dev = model.device
     pad = tok.pad_token_id if tok.pad_token_id is not None \
         else tok.eos_token_id
 
@@ -181,7 +184,7 @@ def main():
                 ids[r, width - len(s):] = torch.tensor(s)
                 attn[r, width - len(s):] = 1
             out = model.generate(
-                ids.to(args.device), attention_mask=attn.to(args.device),
+                ids.to(dev), attention_mask=attn.to(dev),
                 max_new_tokens=args.max_new, do_sample=False,
                 pad_token_id=pad)
             for r in range(len(seqs)):
