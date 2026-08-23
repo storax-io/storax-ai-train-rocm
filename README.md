@@ -24,7 +24,9 @@ code forks.
 
 **How it all fits together** — the verified-data flywheel, the teacher's
 role, the measured LUMI topology, and the evaluation loop, with diagrams:
-[docs/architecture.md](docs/architecture.md).
+[docs/architecture.md](docs/architecture.md). **Every harness command as
+a flowchart** — train, replay generators, oracle eval, gates, triage:
+[docs/cli.md](docs/cli.md).
 
 ## What it demonstrates
 

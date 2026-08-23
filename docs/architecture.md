@@ -2,6 +2,7 @@
 
 How a compiler, a teacher model, and a trainer form one verified loop —
 and why no unverified token ever reaches the model being trained.
+(Per-command flowcharts: [cli.md](cli.md).)
 
 The system trains open-weights models (currently Ministral-3 14B) on
 capabilities that did not exist in their pretraining data (C++26
