@@ -80,7 +80,14 @@ def _wrap(prompt, rid, std="C++26"):
         return prompt + " Only output the code."
     i = int(hashlib.sha256(
         f"{_FMT_SEED}:{rid}".encode()).hexdigest()[:12], 16)
-    return _FMTS[i % len(_FMTS)].format(p=prompt, std=std)
+    out = _FMTS[i % len(_FMTS)].format(p=prompt, std=std)
+    # the standard is named AT BIRTH, always (Henri 2026-08-23): three
+    # bank shapes carry no {std} slot — v7 audit: 87/11,677 prompts
+    # escaped unnamed through them. Append rather than reshape so the
+    # bank's surface diversity survives.
+    if std.lower() not in out.lower():
+        out += f" Use {std}."
+    return out
 
 
 def _rows(name):
