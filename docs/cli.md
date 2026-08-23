@@ -30,6 +30,8 @@ flowchart LR
 
 ### `sc preflight`
 
+Zero-cost readiness check. Verifies the staged code and data on the login node before anything is allowed to queue — a failed preflight blocks every launch verb.
+
 ```mermaid
 flowchart LR
     P[sc preflight] --> C["verify staged code + data<br/>against the sync manifest<br/>(login-side, zero cost)"]
@@ -38,6 +40,8 @@ flowchart LR
 ```
 
 ### `sc gen MANIFEST`
+
+Launches a whole generation from a manifest file: one training round per row, each with its failure janitor and a chained wide eval, so the verdicts arrive while later rounds are still training.
 
 ```mermaid
 flowchart LR
@@ -51,6 +55,8 @@ flowchart LR
 
 ### `sc rounds GEN ROUND MIX DRILL STEPS SEED…`
 
+Launches one recipe across a list of seeds — the seed-replication form of `gen` (≥3 seeds per config; single-seed comparisons are noise).
+
 ```mermaid
 flowchart LR
     A["one recipe,<br/>a list of seeds"] --> L{"per seed"}
@@ -58,10 +64,9 @@ flowchart LR
     RJ -- afterok --> EV["chained eval<br/>(long generation cap)"]
 ```
 
-Single-recipe form of `gen` — used for seed replication (≥3 seeds per
-config; single-seed comparisons are noise).
-
 ### `sc consolidate NAME MIX DRILL SEED [MTOK]`
+
+Trains a large token budget as an idempotent chain of Slurm segments sharing one LR schedule, widening across a node ladder, with concurrent per-segment evals and automatic plateau cutoff. Re-running the same command is the recovery procedure.
 
 ```mermaid
 flowchart TB
@@ -78,6 +83,8 @@ flowchart TB
 
 ### `sc campaign PLAN.json [--continue|--reset]`
 
+Runs an unattended multi-stage arc from a JSON plan: each stage's terminal jobs chain a director job that gates on artifacts and submits the next stage. A failed gate pauses the line with the reason.
+
 ```mermaid
 flowchart TB
     PL["plan: JSON stage list<br/>(gen | consolidate | replay | sweep),<br/>each with an artifact gate"] --> KEY["state keyed to the PLAN —<br/>a new plan starts at stage 0;<br/>a stale --continue is ignored"]
@@ -90,6 +97,8 @@ flowchart TB
 ```
 
 ### `sc reconcile [--plan P]`
+
+Converges reality toward the plan: observes what exists (run tree, queue) versus what should, and submits exactly what is missing. The single recovery verb after any interruption or confusion.
 
 ```mermaid
 flowchart TB
@@ -114,6 +123,8 @@ human.
 
 ### `sc eval RUNDIR…`
 
+Judges specific checkpoints: one wide (8-way sharded) eval job per run dir, each with its own janitor.
+
 ```mermaid
 flowchart LR
     RD["checkpoint dir(s)"] --> WE["wide eval per checkpoint:<br/>one node, sharded across<br/>its 8 GPUs, ~10 min"]
@@ -121,6 +132,8 @@ flowchart LR
 ```
 
 ### `sc sweep [--dense]`
+
+Finds every checkpoint that has a model but no verdict and judges them all — wide by default, packed 8-per-node with `--dense`.
 
 ```mermaid
 flowchart TB
@@ -133,6 +146,8 @@ flowchart TB
 
 ### `sc bench TAG --model M --suite S`
 
+Evaluates any model directory against any suite through the standard judge — for baselining foreign models or re-scoring ours on new suites.
+
 ```mermaid
 flowchart LR
     BM["any model dir<br/>x any suite"] --> CK2["both must exist<br/>(checked login-side)"]
@@ -144,6 +159,8 @@ flowchart LR
 
 ### `sc replay [COUNT]`
 
+Regenerates the retention band at scale: the base model answers plain-C++ prompts, the compiler keeps verified pairs. The anchor data that stops fine-tuning from eroding ordinary competence.
+
 ```mermaid
 flowchart LR
     RP[sc replay] --> GJ["generation job: the BASE model<br/>answers ~COUNT training-shaped<br/>plain-C++ prompts"]
@@ -152,6 +169,8 @@ flowchart LR
 ```
 
 ### `sc harvest TAG [--nodes N --samples K --temp T]`
+
+Expert-iteration burst: the model samples best-of-K answers to fresh prompts across N independent single-node jobs; oracle-verified winners become the next trainpack's expert band.
 
 ```mermaid
 flowchart TB
@@ -166,6 +185,8 @@ flowchart TB
 
 ### `sc corpusfetch`
 
+Prefetches every registry package to shared storage from the login node, because compute nodes have no internet.
+
 ```mermaid
 flowchart LR
     CF[sc corpusfetch] --> RG["read the staged generator's<br/>package registry"]
@@ -175,6 +196,8 @@ flowchart LR
 
 ### `sc corpus`
 
+Submits the corpus-factory job that harvests the prefetched packages into verified training records — after checking every precondition login-side.
+
 ```mermaid
 flowchart TB
     CO[sc corpus] --> PRE["ALL preconditions login-side:<br/>generator staged? config? vendored<br/>capture tool? sources fetched?<br/>container present? no factory<br/>already queued?"]
@@ -183,6 +206,8 @@ flowchart TB
 ```
 
 ### `sc keep GEN/ROUND-sSEED…`
+
+Re-derives a lost keeper checkpoint by retraining its recorded recipe. The result is a new sample of that recipe, judged by its own fresh eval.
 
 ```mermaid
 flowchart LR
@@ -196,6 +221,8 @@ flowchart LR
 
 ### `sc status`
 
+The one-look campaign dashboard: rates, burn, failures, gaps, and what is running — ordered so the most important line lands next to the prompt.
+
 ```mermaid
 flowchart TB
     ST2[sc status] --> TOP["scrolls away first: latest eval<br/>rates, recently finished jobs,<br/>24h node-h burn + top eaters"]
@@ -206,6 +233,8 @@ flowchart TB
 
 ### `sc status-all` · `sc health` · `sc jobstate JOBID`
 
+Drill-downs: `status-all` adds a process-level look inside every running job, `health` probes running jobs for hangs, `jobstate` inspects one job.
+
 ```mermaid
 flowchart LR
     SA[status-all] --> ST3[status] --> EACH["+ per running job:<br/>process-level look"]
@@ -215,6 +244,8 @@ flowchart LR
 
 ### `sc report GEN [REF] [PREV]`
 
+Prints the decision contract for a generation — the numbers a go/no-go is actually made on, with reference and previous-generation columns.
+
 ```mermaid
 flowchart LR
     RE[sc report] --> RD2["read the generation's evals<br/>(+ base reference, + previous gen)"]
@@ -223,6 +254,8 @@ flowchart LR
 
 ### `sc quota`
 
+Everything spendable in one read-only view: billing units, storage on both tiers, node ceilings, idle capacity, and start estimates for burst shapes.
+
 ```mermaid
 flowchart LR
     QU[sc quota] --> RO["read-only sweep: billing units,<br/>storage on both tiers, per-job node<br/>ceilings, idle nodes right now"]
@@ -230,6 +263,8 @@ flowchart LR
 ```
 
 ### `sc weatherprobe` · `sc weather`
+
+Storage-weather instrumentation: `weatherprobe` is the scheduled background probe that writes the verdict submissions consult; `weather` mines our own job logs into an hour-of-day stall grid.
 
 ```mermaid
 flowchart LR
@@ -241,6 +276,8 @@ flowchart LR
 
 ### `sc watch` · `sc bg VERB…`
 
+`watch` is a finite collect-everything loop (drain, sweep, drain, report); `bg` detaches any verb so it survives logout.
+
 ```mermaid
 flowchart LR
     W2["sc bg watch GEN"] --> DT["re-exec detached<br/>(survives logout)"]
@@ -251,6 +288,8 @@ flowchart LR
 
 ### `sc janitor` · `sc evaljanitor NAME`
 
+The two automatic responders: `janitor` recovers node-fault failures (the only auto-retry class), `evaljanitor` retries a failed eval exactly once before pausing the line.
+
 ```mermaid
 flowchart TB
     F{failed job} -- "node fault<br/>(the ONLY auto-retry)" --> JN2["janitor: resubmit the chain,<br/>add the node to the exclude list,<br/>REPORT it upstream — not<br/>just route around"]
@@ -259,6 +298,8 @@ flowchart TB
 ```
 
 ### `sc resume`
+
+Clears the pause after human review and lists what still needs judging.
 
 ```mermaid
 flowchart LR
@@ -269,6 +310,8 @@ flowchart LR
 ## Storage doctrine
 
 ### `sc clean` · `sc archive` · `sc gc [--delete]`
+
+Storage-doctrine enforcement: `clean` retires judged checkpoints and folds strays home, `archive` pushes superseded artifacts to the retention tier, `gc` reclaims weight space while always keeping the scientific record.
 
 ```mermaid
 flowchart TB
