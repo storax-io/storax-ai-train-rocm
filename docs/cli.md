@@ -1,26 +1,34 @@
-# Harness CLI reference — every command as a flowchart
+# Harness CLI reference — every tool as a flowchart
 
 The harness is a set of standalone entry points, not a monolith:
 `traintest/*.py` are the training-loop verbs, `tools/*.py` the
-triage/ops verbs. On WSL/Linux everything runs through the venv wrapper
-— `scripts/run_linux.sh <script.py> [args…]` — and on LUMI through the
-container equivalents; the scripts themselves are identical everywhere.
+gate/triage/ops verbs, `scripts/*.sh` the runners. On LUMI these are
+orchestrated by `sc`, the campaign-front CLI in the (private) ops
+repo — it submits them as plain Slurm jobs chained via `afterok`, with
+janitors on `afternotok`, no daemons; that layer is documented where it
+lives. This page documents the tools themselves — they run identically
+under the local runners and inside the container.
 
-How the verbs compose into one round of the storax loop:
+How the tools compose into one round of the storax loop:
 
 ```mermaid
 flowchart LR
     TP["trainpack<br/>(dataset repo, versioned)"] --> TR[train.py]
     RG["gen_replay / gen_cpp_replay /<br/>gen_std_replay<br/>(model-native anchors)"] --> TR
+    SH["stage-harness.sh<br/>(committed-tree snapshot,<br/>HARNESS_COMMIT stamped)"] -.-> TR
     TR --> CK[checkpoint]
     CK --> VA[validate_ckpt.py] --> EV["oracle_eval.py<br/>(sharded, --shard I/M)"]
-    EV --> ME[merge_eval.py] --> SR["strata_report.py /<br/>error_clusters.py"]
+    EV --> ME[merge_eval.py] --> RPT["gen_report.py /<br/>strata_report.py / error_clusters.py"]
     CK --> GS["make_guard_suite.py<br/>-> oracle_eval on guard suite"]
-    SR -. "coverage + drill targets" .-> TP
+    RPT -. "coverage + drill targets" .-> TP
     CK --> HV[harvest.py] -. "winners band" .-> TP
 ```
 
-## Training
+Local runners: `scripts/run_linux.sh <script.py>` (WSL ROCm venv — the
+local twin of the LUMI container), `scripts/run_win.sh` (Windows venv,
+syncs to C: staging first), `scripts/stage-harness.sh` (committed-tree
+snapshot via `git archive`, HARNESS_COMMIT stamped — a dirty tree
+cannot leak).
 
 ### `train.py --data cpp26ds --out DIR` — one round
 
@@ -38,14 +46,13 @@ flowchart TB
 
 Key flags: `--total-steps` (LR schedule truth for multi-segment runs),
 `--resume-state/--save-state`, `--freeze`, `--seed` (≥3 seeds per
-config — single-seed comparisons are noise), `--min-free-vram` (refuses
-to start on a busy card).
+config), `--min-free-vram` (refuses a busy card). **Data providers**
+(`--data` plugins, not commands): `cpp26dsdata.py` (bands/caps/MIX),
+`cpp26data.py` (earlier corpus provider), `facts.py` (phase-0);
+`hfcompat.py` is the transformers 4/5 chat-template shim under all of
+them.
 
 ### Replay generators — the model-native anchors
-
-All three share one shape; they differ in what they anchor and how the
-answer is verified. **Model-native replay only** — the anchors come
-from the base model being trained, never from a teacher.
 
 ```mermaid
 flowchart LR
@@ -55,104 +62,84 @@ flowchart LR
     V -- "gen_std_replay:<br/>gcc/g++ with the MATCHING<br/>-std= flag, per standard" --> R3["std_replay.json<br/>(C17, C++98/11/17/20 —<br/>standard named in the prompt)"]
 ```
 
-### `harvest.py --model DIR --prompts P.jsonl --samples 8` — expert iteration
+**Model-native replay only** — anchors come from the model being
+trained, never a teacher. On LUMI the first of these runs at scale as the retention-band job.
 
-```mermaid
-flowchart LR
-    P["FRESH prompts<br/>(never the eval suite)"] --> S["best-of-N sampling<br/>(--samples, --temperature)"]
-    S --> O{"oracle: compile+run"}
-    O -- "a sample passes" --> W["winners.jsonl -> the next<br/>trainpack's expert band"]
-    O -- "none pass" --> D[dropped]
-    SH["--shard I/M"] -.-> S
-```
-
-The model teaches itself whatever it can already sample but not yet
-rank first; the compiler keeps the winners.
-
-## Evaluation
-
-### `oracle_eval.py --model M --suite S.jsonl --out R.json` — the verdict layer
+### `oracle_eval.py --model M --suite S.jsonl` — the verdict layer
 
 ```mermaid
 flowchart TB
     SU["suite JSONL {id, prompt}<br/>(--limit, --shard I/M)"] --> G["greedy generation<br/>(--backend hf|vllm, --max-new)"]
     G --> X["extract first ```-fenced block<br/>(whole output if none)"]
     X --> O{"oracle compile<br/>(--run: also execute)"}
-    O -- pass --> SC[scored pass]
+    O -- pass --> SC2[scored pass]
     O -- fail --> RP{"--repair N left?"}
     RP -- yes --> M2["repair prompt with the REAL<br/>compiler output -> regenerate"] --> O
     RP -- no --> SF[scored fail]
-    SC & SF --> RJ["result JSON: rate, per-task<br/>verdicts + diagnostics"]
+    SC2 & SF --> RJ2["result JSON: rate, per-task<br/>verdicts + diagnostics"]
     TRC["--rerun-truncated PREV:<br/>redo only truncated tasks,<br/>merge by id"] -.-> G
 ```
 
-Runs wide by default on LUMI: one shard per GCD, `merge_eval.py`
-recombines — the eval SLO is ~10–15 min wall, never an hour.
+`merge_eval.py merged.json shard*.json` recombines shards (later files
+win, matching oracle_eval's own rerun-merge semantics). This is the judge behind every sharded eval on LUMI.
 
-### `merge_eval.py merged.json shard*.json`
+### `harvest.py` — expert iteration
 
-Recomputes rates over deduped per-task results (later files win,
-matching oracle_eval's own rerun-merge semantics).
+Best-of-N sampling on fresh prompts; the oracle keeps winners →
+`winners.jsonl` → the next trainpack's expert band. The model teaches
+itself whatever it can already sample but not yet rank first.
 
-### `evaluate.py` / `chat.py` / `chatprobe.py`
-
-Phase-0 facts QA (string-keyed, pre-oracle era), interactive REPL
-probing, and scripted chat probes respectively — de-risking tools, not
-part of the verdict layer.
-
-## Gates and triage
-
-### `validate_ckpt.py` — trust no artifact you didn't verify
+### Gates
 
 ```mermaid
 flowchart LR
-    PR["producer (every segment):<br/>sha256 every shipped file +<br/>tensor spot-checks"] --> VJ["validation.json beside<br/>the checkpoint"]
-    CO["consumer (next segment /<br/>eval): re-hash + compare"] --> OK{match?}
-    VJ --> CO
-    OK -- no --> STOP["refuse to resume<br/>(five attempts burned ~250 GPU-h<br/>on a corrupt resume source)"]
+    subgraph vc["tools/validate_ckpt.py"]
+        PR["producer: sha256 every shipped<br/>file + tensor spot-checks<br/>-> validation.json"] --> CO["consumer: re-hash before<br/>resume/eval; mismatch = refuse<br/>(five attempts burned ~250 GPU-h<br/>on a corrupt resume source)"]
+    end
+    subgraph ma["tools/model_acid.py (any host, stdlib+transformers)"]
+        A1["A1 tokenizer decode trap"] & A2["A2 chat-template injection"] & A3["A3 config/weights inventory"] & B1["B generation battery<br/>(collapse signatures)"] --> V2["ACID verdict, exit 1 = FAIL"]
+    end
 ```
 
-### `model_acid.py MODEL_DIR [--generate]` — before trusting any checkpoint on any host
+`tools/make_guard_suite.py` builds the retention-guard suite from
+`cpp_replay.json` — tasks the base model provably answered; the guard
+is a **hard filter** at 0.9 regardless of suite rate.
+
+### Reports and triage
 
 ```mermaid
 flowchart LR
-    A1["A1 tokenizer decode trap<br/>(encode identical, decode<br/>emits raw byte symbols)"] --> V2["ACID verdict line<br/>exit 0 = PASS/WARN<br/>exit 1 = any FAIL"]
-    A2["A2 chat-template injection<br/>(~536-token default system<br/>prompt the model never saw)"] --> V2
-    A3["A3 config/weights inventory<br/>(dtype census from safetensors,<br/>vocab agreement, provenance sha)"] --> V2
-    B1["B (--generate): greedy + sampled<br/>on FRESH prompts, scoring the two<br/>convicted collapse signatures<br/>(empty-fence, cap-babble)"] --> V2
+    EJ["eval JSONs + metrics.jsonl"] --> GR["gen_report.py — the DECISION<br/>CONTRACT: seeds, mean/min-max/sigma,<br/>guard-min, first-shot vs repaired"]
+    EJ --> LC["learning_curve.py — one row<br/>per generation, campaign headline"]
+    EJ --> UP["user_pain.py — the eval as 128<br/>users: wall-clock felt per verdict"]
+    EJ --> N["strata_report.py / error_clusters.py<br/>normalized error signature x family<br/>-> ranked actionables"]
+    N -.-> GEN2["next trainpack (each generation<br/>peels one failure layer)"]
+    LOOP["tools/cpp26_loop.py — local dynamic<br/>rounds: train -> probe -> add verified<br/>remedials for the error CLASS -> retrain"] ~~~ EJ
 ```
 
-Self-contained on purpose (stdlib + transformers): suite hosts don't
-carry the harness, and these traps live exactly in tools outside it.
-
-### `make_guard_suite.py` — the retention guard
-
-Builds a compiler-verified suite from `cpp_replay.json` — tasks the
-base model provably answered correctly. A checkpoint that stops
-compiling on them has eroded plain-C++ competence; the guard is a
-**hard filter** at threshold 0.9, regardless of suite rate.
-
-### `strata_report.py` / `error_clusters.py` — failures into generator work
-
-```mermaid
-flowchart LR
-    EJ["eval JSONs<br/>(runs/**/eval/eval.json)"] --> N["normalize first_error<br/>(strip identifiers, numbers, paths)"]
-    N --> CL["cluster by signature<br/>x template family"]
-    CL --> MD["ranked markdown report:<br/>each cluster = one actionable —<br/>generator coverage gap OR drill target"]
-    MD -.-> GEN2["next trainpack<br/>(failures are layered; each<br/>generation peels one)"]
-```
-
-## Ops
+### Probes and environment (run before anything expensive)
 
 | tool | one line |
 |---|---|
-| `scripts/run_linux.sh` | run any traintest script under the WSL ROCm venv (closest local twin of the LUMI container) |
+| `traintest/env_probe.py` | ROCm/PyTorch env probe, one JSON, never raises — failures are diagnoses |
+| `traintest/triton_probe.py` | compile+run real Triton kernels, numerics vs eager — the Instinct-pathfinding test |
+| `traintest/impcheck.py` | surface the real exception behind transformers' lazy-import wrapper |
+| `traintest/download.py` | pre-fetch a model into the HF cache |
+| `traintest/chat.py` | interactive GPU REPL (`/think`, `/temp`, `/clear`) |
+| `traintest/chatprobe.py` | scripted chat probes: general-chat drift, base vs tuned |
+| `traintest/thinkprobe.py` | thinking-mode template mechanics + natural trace length |
+| `tools/gpu_acceptance.py` | GPU acceptance: VRAM pattern-fill integrity + sustained bf16 burst |
+| `tools/node_probe.py` | per-node health: alloc+GEMM+sync every GCD + filesystem touch — a wedged GPU fails in seconds, not mid-round |
 | `tools/estimate.py` | project measured MFU to other GPUs/model sizes |
-| `tools/gpu_acceptance.py` / `node_probe.py` | is this card/node healthy enough to train on |
-| `tools/cpp26_loop.py` | local dynamic rounds: train → probe-eval → add oracle-verified remedials for failing error classes → retrain |
-| `tools/learning_curve.py` / `gen_report.py` | plots and run reports from metrics.jsonl |
-| `tools/model_acid.py` | see above — ships to any host, no harness needed |
 
-Dataset-side commands (`cpp26ds …`: drillgen, synthgen, harvest-packages,
-trainpack, …) live in the dataset repo — flowcharts in
-[storax-dataset-cpp26 docs/cli.md](../../storax-dataset-cpp26/docs/cli.md).
+### Phase-0 lineage (kept for the de-risking story)
+
+`evaluate.py` (string-keyed facts QA), `tools/build_dataset.py`
+(Wikipedia → facts corpus), `tools/build_cpp26_corpus.py` (first
+oracle-verified C++26 corpus builder; superseded by the dataset repo).
+
+---
+
+Dataset-side commands (`cpp26ds …`: drillgen, synthgen,
+harvest-packages, trainpack, …) live in the dataset repo — flowcharts
+in [storax-dataset-cpp26 docs/cli.md](https://github.com/storax-io/storax-dataset-cpp26/blob/main/docs/cli.md).

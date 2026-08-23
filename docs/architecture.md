@@ -169,38 +169,6 @@ fingerprint of a model never told what it was writing), and the source
 cap (one codebase's style correlating with everything is corpus-level
 imprinting).
 
-## Fleet topology (where things run)
-
-```mermaid
-flowchart LR
-    DEV["local dev (WSL)<br/>repos, commits"] -- "git push" --> GH[("GitHub<br/>canonical remotes")]
-    DEV -- "scp changed files<br/>(virre checkouts are deploys,<br/>not clones)" --> V
-    subgraph V["virre — corpus master + suite host"]
-        CM["~/storax-dataset-cpp26<br/>var/imported.jsonl (THE corpus)<br/>var/pkg checkouts · ops/ · var/logs"]
-        OC2["gxx-oracle container :8950<br/>g++16.1 + gcc, complete headers"]
-        FG["forge gateway :8091<br/>(base-model eval serving)"]
-        RM2["resource manager :8100"]
-    end
-    subgraph K["kvm"]
-        ORC["orchestrator :8000"]
-        MCP["reference-mcp :8930"]
-        GRAF["grafana + telemetry"]
-    end
-    CM <--> OC2
-    CM -- "trainpack (versioned,<br/>manifested — the only<br/>sanctioned transfer)" --> L
-    subgraph L["LUMI-G"]
-        TRN["training bursts<br/>(run.sh chains, oracle sidecar<br/>per node)"]
-    end
-    ORC <--> MCP
-    ORC -.-> FG
-```
-
-The corpus master on virre is a single point of failure (off-machine
-backup is an open ops item — grant storage is project-scoped, never the
-master). Intake mechanics: [storax-dataset-cpp26
-docs/harvest.md](../../storax-dataset-cpp26/docs/harvest.md); CLI
-flowcharts: [docs/cli.md](../../storax-dataset-cpp26/docs/cli.md).
-
 ## Training topology (LUMI-G, measured)
 
 ```mermaid
