@@ -9,6 +9,47 @@ capabilities that did not exist in their pretraining data (C++26
 reflection, contracts), using a **compiler as ground truth** at every
 stage: corpus admission, checkpoint evaluation, and retention guarding.
 
+## The master training flowchart
+
+Every stage, its cost class, and where its output goes — the one chart
+to start from. Details per stage: corpus intake below, campaign verbs
+in [cli.md](cli.md), tools in [tools.md](tools.md).
+
+```mermaid
+flowchart TB
+    subgraph CORPUS["CORPUS SIDE — harvest host · cost: CPU + API cents"]
+        REG["package registry<br/>(licenses, build modes,<br/>park/ditch history)"] --> HV["harvest: build -> capture -><br/>closure -> gates"]
+        SYN["generator: drills / synth /<br/>teacher streams"] --> OR
+        HV --> OR{"g++/gcc ORACLE<br/>compile(+run) gate —<br/>nothing unverified trains"}
+        OR -- fail --> REJ["rejected<br/>(kept as diagnostics)"]
+        OR -- pass --> VAR["verified streams"]
+        VAR --> AIJ{"AI judge (cheap model):<br/>teach/lang/clean/coherent,<br/>Wilson-bounded per origin"}
+        AIJ -- "junk band" --> PURGE["purge / ditch<br/>(conscious, logged)"]
+        AIJ -- ok --> PACK["pack builder: source caps,<br/>drill cap, honest MIX,<br/>format bank, standards named"]
+        PACK --> TP["TRAINPACK vX<br/>versioned + manifested"]
+    end
+    RB["model-native replay bands<br/>(chat / plain C++ / per-standard)"] --> TP
+    TP -- "sync (sha-verified staging)" --> LUMI
+    subgraph LUMI["TRAINING SIDE — supercomputer · cost: module-hours"]
+        PF2["preflight (free)"] --> CAMP["campaign plan<br/>(stages + artifact gates)"]
+        CAMP --> SEG["segment-chain training<br/>(width ladder, one LR schedule,<br/>done segments never retrain)"]
+        SEG --> CEV["concurrent wide evals<br/>(1 node x ~10 min each)"]
+        CEV --> CONV["converge director:<br/>plateau -> cancel pending tail"]
+        CEV --> GATES{"gates: suite rate ·<br/>retention guard (hard) ·<br/>medtok collapse band"}
+        GATES -- pass --> NEXT["next stage /<br/>release candidate"]
+        GATES -- fail --> PAUSE2["PAUSE -> human review<br/>-> reconcile (resumes only<br/>the unfinished remainder)"]
+    end
+    CEV --> TRIAGE["strata triage: error clusters<br/>-> coverage + drill targets"]
+    TRIAGE -.-> SYN
+    NEXT -. "harvest winners<br/>(expert iteration)" .-> VAR
+```
+
+Reading rules for the chart: the oracle and the retention guard are the
+two gates that are never bypassed; everything left of the sync costs
+cents, everything right of it costs module-hours; and every arrow into
+a training step comes from a versioned, manifested artifact — nothing
+enters by hand.
+
 ## The verified-data flywheel
 
 ```mermaid
