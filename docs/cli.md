@@ -1,141 +1,287 @@
 # `sc` — the campaign CLI (usage reference)
 
-`sc` is how the storax training campaign is operated on the
-supercomputer: one command turns an intent — "run this generation",
-"judge every checkpoint", "train 1B tokens as a segment chain" — into
-a Slurm job chain. **Closed source, open usage**: the implementation is
-private; this page documents the command surface and its semantics.
+`sc` is a **front end to Slurm**: it owns no runtime of its own — one
+command turns an intent ("run this generation", "judge every
+checkpoint", "train 1B tokens as a segment chain") into the right
+Slurm job chain, and all causality lives in Slurm dependencies.
+**Closed source, open usage**: the implementation is private; this page
+documents the command surface, one flowchart per verb.
 
-Design rules that hold for every verb: everything submitted is a plain
+Design rules that hold everywhere: everything submitted is a plain
 Slurm job — chains via `afterok`, failure janitors via `afternotok`,
 **no daemons, no cron**. Errors pause the line; hardware faults
 self-heal; nothing burns to a time cap. Every submit verb is
 **idempotent** — re-running the same command resumes or converges
-instead of duplicating work. The jobs themselves execute the
-open-source harness tools in this repo ([tools.md](tools.md)).
+instead of duplicating. The jobs execute the open-source harness tools
+in this repo ([tools.md](tools.md)).
+
+Every submit verb passes the same gate first:
 
 ```mermaid
-flowchart TB
-    subgraph gate["every submission passes"]
-        PZ{"line paused?"} -- yes --> DIE["refuse: review,<br/>then sc resume"]
-        PZ -- no --> WX{"fresh weather<br/>verdict bad?"}
-        WX -- "storage dark<br/>< 15 min ago" --> DIE2["WEATHER HOLD<br/>(billed nodes never<br/>probe out a storm)"]
-        WX -- clear/stale --> OKG[submit]
-    end
-    subgraph submitters["submit verbs"]
-        S1["gen / rounds / eval / sweep"]
-        S2["consolidate / campaign / reconcile"]
-        S3["harvest / bench / replay / keep"]
-        S4["corpus / corpusfetch"]
-    end
-    subgraph observers["observe verbs (read-only)"]
-        O1["status / status-all / health /<br/>jobstate / report / quota /<br/>weather / watch"]
-    end
-    subgraph maint["recover + storage"]
-        M1["janitor / evaljanitor / resume"]
-        M2["clean / archive / gc"]
-    end
-    submitters --> gate --> Q[("Slurm queue<br/>afterok chains")]
+flowchart LR
+    V[any submit verb] --> PZ{"line paused?"}
+    PZ -- yes --> DIE["refuse: review,<br/>then sc resume"]
+    PZ -- no --> WX{"fresh weather<br/>verdict bad?"}
+    WX -- "storage dark<br/>< 15 min ago" --> DIE2["WEATHER HOLD —<br/>billed nodes never<br/>probe out a storm"]
+    WX -- clear/stale --> Q[("Slurm queue")]
 ```
 
 ## Launching training
 
-### `sc preflight` · `sc gen MANIFEST` · `sc rounds GEN ROUND MIX DRILL STEPS SEED…`
+### `sc preflight`
 
 ```mermaid
 flowchart LR
-    MF["manifest rows:<br/>gen round mix drill seed steps"] --> PF["preflight (no cost):<br/>verify code + data vs<br/>the sync manifest"]
-    PF --> RJ["round job per row"]
-    RJ -- afternotok --> JN["janitor job<br/>(node faults only:<br/>retry + exclude list)"]
-    RJ -- afterok --> EV["WIDE eval — own node,<br/>8-way sharded, ~10 min<br/>(EVAL SLO: no verdict<br/>layer runs an hour)"]
-    EV -- afternotok --> EJ["evaljanitor: retry ONCE<br/>(shard-resume reuses work);<br/>second failure -> pause"]
+    P[sc preflight] --> C["verify staged code + data<br/>against the sync manifest<br/>(login-side, zero cost)"]
+    C -- clean --> OK[ready to submit]
+    C -- mismatch --> X["nonzero exit —<br/>nothing may launch"]
 ```
 
-`gen` reads a manifest (one row per round: generation, round name, mix,
-drill share, seed, steps) and queues the whole generation — rounds,
-per-round wide evals, janitors — then it is safe to log out. `rounds`
-is the single-recipe form for a list of seeds.
+### `sc gen MANIFEST`
 
-### `sc consolidate NAME MIX DRILL SEED [MTOK]` — segment-chain training
+```mermaid
+flowchart LR
+    MF["manifest rows:<br/>gen round mix drill seed steps"] --> PF[preflight]
+    PF --> RJ["one round job per row"]
+    RJ -- afternotok --> JN["janitor<br/>(node faults only)"]
+    RJ -- afterok --> EV["WIDE eval: own node,<br/>8-way sharded, ~10 min —<br/>verdicts overlap later<br/>rounds' training"]
+    EV -- afternotok --> EJ[evaljanitor]
+    RJ & EV --> OUT["generation queued —<br/>safe to log out"]
+```
+
+### `sc rounds GEN ROUND MIX DRILL STEPS SEED…`
+
+```mermaid
+flowchart LR
+    A["one recipe,<br/>a list of seeds"] --> L{"per seed"}
+    L --> RJ["round job + janitor"]
+    RJ -- afterok --> EV["chained eval<br/>(long generation cap)"]
+```
+
+Single-recipe form of `gen` — used for seed replication (≥3 seeds per
+config; single-seed comparisons are noise).
+
+### `sc consolidate NAME MIX DRILL SEED [MTOK]`
 
 ```mermaid
 flowchart TB
-    LAD["width ladder (e.g. 8->16->32->64 nodes,<br/>custom via --ladder n:mtok,…)<br/>one LR schedule across segments"] --> SEGS["afterok segment chain<br/>(+1 spare node per segment: a sick<br/>node idles instead of killing the run)"]
-    SEGS --> IDEM{"segment state<br/>already on disk?"}
-    IDEM -- yes --> SKIP["skipped — re-running the<br/>same command IS the<br/>hang/failure recovery"]
-    IDEM -- "mid-checkpoint" --> MID["resume from the segment's<br/>mid-checkpoint"]
-    SEGS --> CEVAL["per-segment evals run<br/>CONCURRENTLY on their own nodes —<br/>the chain never waits on a verdict"]
-    CEVAL --> CONV["converge director (tiny CPU job):<br/>seg-over-seg gain < --improve-min<br/>-> cancel the still-PENDING tail.<br/>The plateau is the cutoff, not the<br/>token plan. A missing eval<br/>cancels NOTHING."]
-    CTRL["--controlled: submit only the next<br/>segment; each director computes<br/>family weights from its eval and<br/>extends the chain itself"] -.-> SEGS
-    FORK["--from DIR: fork any validated<br/>checkpoint into a parallel branch"] -.-> SEGS
+    LAD["width ladder (e.g. 8->16->32->64 nodes,<br/>custom --ladder n:mtok,…)<br/>ONE LR schedule across segments"] --> SEGS{"per segment:<br/>state already<br/>on disk?"}
+    SEGS -- done --> SKIP["skipped — re-running the same<br/>command IS the recovery"]
+    SEGS -- mid-checkpoint --> MID["resume from the<br/>segment's midpoint"]
+    SEGS -- missing --> SB["submit segment, afterok on the<br/>previous (+1 spare node: a sick<br/>node idles, doesn't kill the run)"]
+    SB --> CEVAL["segment evals run CONCURRENTLY<br/>on their own nodes — the chain<br/>never waits on a verdict"]
+    CEVAL --> CONV["converge director per segment:<br/>gain < --improve-min -> cancel the<br/>still-PENDING tail. The plateau is<br/>the cutoff, not the token plan.<br/>A missing eval cancels NOTHING."]
+    CTRL["--controlled: submit only the next<br/>segment; each director computes<br/>family weights from its eval and<br/>extends the chain itself"] -.-> SB
+    FORK["--from DIR: fork any validated<br/>checkpoint into a parallel branch"] -.-> SB
+    TAIL["chain fully trained but final eval<br/>missing (e.g. a timeout took the<br/>dependent eval down)? re-running<br/>submits exactly the missing eval"] -.-> CEVAL
 ```
 
-### `sc campaign PLAN.json` · `sc reconcile` — unattended multi-stage arcs
+### `sc campaign PLAN.json [--continue|--reset]`
 
 ```mermaid
 flowchart TB
-    PL["plan: JSON stage list<br/>(gen | consolidate | replay | sweep),<br/>each with an artifact gate"] --> ST["submit stage i"]
-    ST --> DIR["director (tiny CPU job,<br/>afterany on the stage's<br/>terminal jobs)"]
-    DIR --> GATE{"gate on artifacts:<br/>any (rate, guard, medtok)<br/>candidate passes?"}
-    GATE -- pass --> NEXT["submit stage i+1"]
-    GATE -- fail --> PAU["pause with the reason"]
-    REC["sc reconcile — THE recovery verb.<br/>Level-triggered: observe desired (plan)<br/>vs actual (run tree + queue), submit<br/>exactly what's missing, idempotently.<br/>INFRA gap -> resubmit (retry budget);<br/>VERDICT failure -> pause for review.<br/>Safe at any moment, from any trigger."] -.-> GATE
+    PL["plan: JSON stage list<br/>(gen | consolidate | replay | sweep),<br/>each with an artifact gate"] --> KEY["state keyed to the PLAN —<br/>a new plan starts at stage 0;<br/>a stale --continue is ignored"]
+    KEY --> G0{"--continue: gate the<br/>finished stage — any<br/>(rate, guard, medtok)<br/>candidate passes?"}
+    G0 -- fail --> PAU["pause with the reason"]
+    G0 -- pass --> ST["submit stage i"]
+    ST --> DIR["director: tiny CPU job on<br/>afterany of the stage's terminal<br/>jobs -> sc campaign --continue"]
+    DIR --> KEY
+    RST["--reset: refused while the plan's<br/>own jobs are still queued/running"] -.-> KEY
 ```
 
-Campaign state is keyed to the plan (a new plan starts at stage 0); a
-stale director continuation is ignored. `reconcile` replaced the whole
-resume/reset/continue decision tree: decisions come from observed
-state, never from which event fired.
+### `sc reconcile [--plan P]`
+
+```mermaid
+flowchart TB
+    R[sc reconcile] --> LK["take the reconcile lock<br/>(a second invocation no-ops)"]
+    LK --> PZ2{"line paused?"} -- yes --> HH["stop: human review first"]
+    PZ2 -- no --> OBS["observe desired (plan) vs<br/>actual (run tree + queue)"]
+    OBS --> D{per stage}
+    D -- "gate passes" --> NXT[next stage]
+    D -- "jobs in flight" --> WAIT["wait — never race live work"]
+    D -- "trained, unjudged" --> SE["submit the missing eval<br/>(retry budget 3)"]
+    D -- "segments incomplete" --> SC2["re-run the consolidate<br/>(idempotent resume, budget 3)"]
+    D -- "judged and still failing" --> PV["VERDICT failure -><br/>pause for review"]
+```
+
+The recovery verb: level-triggered convergence, safe to invoke at any
+moment from any trigger. It replaced the resume/reset/continue decision
+tree — decisions come from observed state, never from which event
+fired. Infra gaps get a bounded retry budget; real verdicts get a
+human.
 
 ## Judging
 
-### `sc eval RUNDIR…` · `sc sweep [--dense]` · `sc bench TAG --model M --suite S`
-
-| verb | semantics |
-|---|---|
-| `eval` | wide eval per checkpoint: one node, sharded across its 8 GPUs, ~10 min — same GPU-h as dense, ~8× less wall-clock, small jobs backfill well |
-| `sweep` | find every checkpoint with a model but no verdict and submit wide evals for all of them; `--dense` packs 8 per node with a short generation cap — a truncation at the cap *is* the verdict "broken" |
-| `bench` | any model × any suite through the same judge with the same repair semantics; foreign models skip the retention guard |
-
-## Data verbs
-
-| verb | semantics |
-|---|---|
-| `sc replay [COUNT]` | regenerate the retention band at scale: base-model answers to training-shaped plain-C++ prompts, compiler-verified — run before the first consolidation |
-| `sc harvest TAG` | expert-iteration burst: N independent single-node jobs, best-of-N sampling on FRESH prompts (never the eval suite), the oracle keeps verified winners; fleet-of-ones queues well; re-run to resume unfinished shards |
-| `sc corpusfetch` | login-side prefetch (compute nodes have no internet): shallow-clone every registry package for the corpus factory |
-| `sc corpus` | submit the corpus-factory job — **all** preconditions checked login-side before a single core-hour is queued |
-
-## Observing
-
-| verb | one line |
-|---|---|
-| `sc status` | bottom-up terminal order: latest rates and 24h burn scroll away, failures sit second-to-last, RUNNING lands at the prompt; plus eval gaps, excluded nodes, campaign stage, storage weather |
-| `sc status-all` | status + a process-level look inside every running job |
-| `sc health` | probe running jobs for hangs |
-| `sc jobstate JOBID` | peek inside one job: metrics tail, eval slot states, GPU busy |
-| `sc report GEN [REF] [PREV]` | the generation decision contract: seeds, suite mean/min–max/σ, guard-min, first-shot vs repaired |
-| `sc quota` | billing units, storage on both tiers, node ceilings, idle counts, start estimates for burst shapes — read-only |
-| `sc weatherprobe` | background storage-weather probe (scheduled ~5 min); submissions consult the stored verdict instead of discovering the weather on a paid allocation |
-| `sc weather` | stall-recurrence grid by hour-of-day, mined from our own job telemetry — the shared-filesystem schedule emerges from normal operation |
-| `sc watch` | finite collection loop: drain → sweep gaps → drain → report; run detached via `sc bg watch …` |
-| `sc bg VERB…` | re-exec any verb detached (survives logout) |
-
-## Recovery and storage
+### `sc eval RUNDIR…`
 
 ```mermaid
 flowchart LR
-    F{failure} -- "node fault<br/>(the only auto-retry)" --> J["janitor: resubmit +<br/>exclude list; faulty nodes<br/>REPORTED upstream,<br/>not just excluded"]
-    F -- "anything else" --> P["line pause: queued jobs no-op,<br/>submissions refuse —<br/>errors are information"]
-    P --> HR["human review"] --> RS["sc resume: clear the pause,<br/>list unjudged checkpoints"]
+    RD["checkpoint dir(s)"] --> WE["wide eval per checkpoint:<br/>one node, sharded across<br/>its 8 GPUs, ~10 min"]
+    WE -- afternotok --> EJ2[evaljanitor]
 ```
 
-| verb | semantics |
-|---|---|
-| `sc clean` | enforce the storage doctrine: working tier holds records + in-flight checkpoints, retention tier holds evaluated ones — retire (symlink back), delete salvage debris, fold strays home |
-| `sc archive` | push superseded artifacts to the retention tier (sealed segments' predecessors, judged round checkpoints); symlinks left; idempotent |
-| `sc gc [--delete]` | weights of superseded runs are disposable; the scientific record (evals, metrics, manifests, validations) is always kept; dry-run by default |
-| `sc keep GEN/ROUND-sSEED…` | re-derive lost keeper checkpoints from their chain specs — honestly: runs are not bit-deterministic, a re-derived keeper is a NEW SAMPLE and its fresh eval decides its worth |
+### `sc sweep [--dense]`
+
+```mermaid
+flowchart TB
+    SW[sc sweep] --> SCAN["scan every run root for<br/>checkpoints with a model<br/>but no verdict (eval gaps)"]
+    SCAN -- none --> N0["no eval gaps"]
+    SCAN --> MODE{--dense?}
+    MODE -- no --> WIDE["one wide eval per gap —<br/>same GPU-h as dense,<br/>~8x less wall-clock,<br/>small jobs backfill well"]
+    MODE -- yes --> DENSE["chunks of 8 per node,<br/>short generation cap —<br/>truncation at the cap IS<br/>the verdict 'broken'"]
+```
+
+### `sc bench TAG --model M --suite S`
+
+```mermaid
+flowchart LR
+    BM["any model dir<br/>x any suite"] --> CK2["both must exist<br/>(checked login-side)"]
+    CK2 --> BE["standard wide eval: same<br/>judge, same repair semantics;<br/>foreign models skip the<br/>retention guard"]
+    BE --> ROW["a battery row"]
+```
+
+## Data
+
+### `sc replay [COUNT]`
+
+```mermaid
+flowchart LR
+    RP[sc replay] --> GJ["generation job: the BASE model<br/>answers ~COUNT training-shaped<br/>plain-C++ prompts"]
+    GJ --> OV["compiler verifies every answer"]
+    OV --> RB["retention band at scale —<br/>run before the first consolidation<br/>(a small band cannot anchor a<br/>large corpus)"]
+```
+
+### `sc harvest TAG [--nodes N --samples K --temp T]`
+
+```mermaid
+flowchart TB
+    HV[sc harvest] --> CK3["model + prompts must exist;<br/>prompts are FRESH — never<br/>the eval suite"]
+    CK3 --> FLEET["N independent single-node jobs<br/>(fleet-of-ones: queue-friendly,<br/>no collectives, no wide unknowns)"]
+    FLEET --> BN["each: best-of-K sampling<br/>per prompt shard"]
+    BN --> OR{"oracle:<br/>compile+run"}
+    OR -- winner --> W["winners append live;<br/>.done marker per shard"]
+    OR -- none pass --> DR[dropped]
+    W --> RES["re-running the same command<br/>re-queues only unfinished shards"]
+```
+
+### `sc corpusfetch`
+
+```mermaid
+flowchart LR
+    CF[sc corpusfetch] --> RG["read the staged generator's<br/>package registry"]
+    RG --> CL["shallow-clone every entry<br/>login-side (compute nodes<br/>have no internet)"]
+    CL --> ID["idempotent: existing<br/>checkouts reused"]
+```
+
+### `sc corpus`
+
+```mermaid
+flowchart TB
+    CO[sc corpus] --> PRE["ALL preconditions login-side:<br/>generator staged? config? vendored<br/>capture tool? sources fetched?<br/>container present? no factory<br/>already queued?"]
+    PRE -- any missing --> BL["BLOCKED: each problem printed,<br/>zero core-hours spent"]
+    PRE -- all present --> FJ["submit the corpus-factory job<br/>(CPU partition)"]
+```
+
+### `sc keep GEN/ROUND-sSEED…`
+
+```mermaid
+flowchart LR
+    KP[sc keep] --> SPEC["look up the run's<br/>recorded chain spec<br/>(recipe: mix, drill, steps, seed)"]
+    SPEC -- missing --> NO["cannot re-derive"]
+    SPEC --> RT["retrain the exact recipe<br/>+ chained eval"]
+    RT --> HON["HONESTY: runs are not<br/>bit-deterministic — this is a NEW<br/>SAMPLE; its fresh eval decides its<br/>worth, the old number does not carry"]
+```
+
+## Observing (read-only)
+
+### `sc status`
+
+```mermaid
+flowchart TB
+    ST2[sc status] --> TOP["scrolls away first: latest eval<br/>rates, recently finished jobs,<br/>24h node-h burn + top eaters"]
+    TOP --> MID2["second-to-last: failures,<br/>eval gaps, excluded nodes,<br/>campaign stage, storage weather"]
+    MID2 --> BOT["at the prompt (most visible):<br/>pause banner + RUNNING/queued<br/>with backfill start estimates"]
+    NOTE["bottom-up terminal order:<br/>what you must see sits<br/>next to your cursor"] -.- BOT
+```
+
+### `sc status-all` · `sc health` · `sc jobstate JOBID`
+
+```mermaid
+flowchart LR
+    SA[status-all] --> ST3[status] --> EACH["+ per running job:<br/>process-level look"]
+    H[health] --> RJ2["every running job probed<br/>for hang signals"]
+    JS[jobstate JOBID] --> ONE["one job: training metrics tail,<br/>eval slot states, GPU busy"]
+```
+
+### `sc report GEN [REF] [PREV]`
+
+```mermaid
+flowchart LR
+    RE[sc report] --> RD2["read the generation's evals<br/>(+ base reference, + previous gen)"]
+    RD2 --> DC["the DECISION CONTRACT per config:<br/>seeds, suite mean/min-max/sigma,<br/>guard-min, first-shot vs repaired"]
+```
+
+### `sc quota`
+
+```mermaid
+flowchart LR
+    QU[sc quota] --> RO["read-only sweep: billing units,<br/>storage on both tiers, per-job node<br/>ceilings, idle nodes right now"]
+    RO --> EST["start estimates for burst<br/>shapes (--test-only probes)"]
+```
+
+### `sc weatherprobe` · `sc weather`
+
+```mermaid
+flowchart LR
+    WP[weatherprobe] --> BP["bounded probe of the active<br/>storage tier (background job,<br/>scheduled ~5 min)"]
+    BP --> VJ2["verdict file: submissions consult<br/>it instantly — patience belongs in<br/>the QUEUE, not on billed nodes"]
+    WA[weather] --> TG["mine our own job logs'<br/>stall sentinels"]
+    TG --> GRID["recurrence grid by hour-of-day —<br/>the shared-filesystem schedule<br/>emerges from normal operation;<br/>hand the grid to the operator"]
+```
+
+### `sc watch` · `sc bg VERB…`
+
+```mermaid
+flowchart LR
+    W2["sc bg watch GEN"] --> DT["re-exec detached<br/>(survives logout)"]
+    DT --> LOOP2["finite loop: drain queue -><br/>sweep gaps -> drain -> report"]
+```
+
+## Recovery
+
+### `sc janitor` · `sc evaljanitor NAME`
+
+```mermaid
+flowchart TB
+    F{failed job} -- "node fault<br/>(the ONLY auto-retry)" --> JN2["janitor: resubmit the chain,<br/>add the node to the exclude list,<br/>REPORT it upstream — not<br/>just route around"]
+    F -- "anything else" --> P2["pause the line: queued jobs<br/>no-op, submissions refuse —<br/>errors are information"]
+    EVF{failed eval} --> EJ3["evaljanitor: verdict already<br/>on disk? done. else retry ONCE<br/>(shard-resume reuses finished<br/>work); second failure -> pause"]
+```
+
+### `sc resume`
+
+```mermaid
+flowchart LR
+    RS2[sc resume] --> CL2["clear the pause<br/>(after human review)"]
+    CL2 --> GAPS["list checkpoints still<br/>unjudged -> sc sweep"]
+```
+
+## Storage doctrine
+
+### `sc clean` · `sc archive` · `sc gc [--delete]`
+
+```mermaid
+flowchart TB
+    CLN[sc clean] --> DOC["doctrine: working tier = records +<br/>in-flight checkpoints; retention<br/>tier = evaluated ones"]
+    DOC --> RET["retire evaluated checkpoints<br/>(symlink left behind)"]
+    DOC --> SAL["delete weight-bearing salvage"]
+    DOC --> FOLD["fold stray scratch trees home"]
+    AR[sc archive] --> SUP["superseded artifacts only:<br/>sealed segments' predecessors,<br/>judged round checkpoints"]
+    SUP --> MV["push to retention, symlink back,<br/>idempotent — nothing hot touched"]
+    GC[sc gc] --> SCAN2["scan every run's weights;<br/>KEEP: release, current best,<br/>anything touched < 24h"]
+    SCAN2 --> DRY["dry-run report: reclaimable GiB"]
+    DRY -- "--delete" --> DEL["remove weights of superseded runs;<br/>the scientific record (evals, metrics,<br/>manifests, validations) is ALWAYS kept"]
+```
 
 ---
 
