@@ -31,7 +31,7 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 LLAMA = TOOLS / "llama.cpp"
-PIN = "b6200"   # known-good tag; bump deliberately
+PIN = "b10622"   # verified live tag 2026-08-25; bump deliberately
 
 
 def sh(cmd, **kw):
