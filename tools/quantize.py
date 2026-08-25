@@ -39,6 +39,19 @@ def sh(cmd, **kw):
     subprocess.run([str(c) for c in cmd], check=True, **kw)
 
 
+def _real_vulkan_device() -> bool:
+    """llvmpipe-only Vulkan (stock Ubuntu on WSL: no dozen ICD) is
+    SLOWER than the native CPU backend — only count real devices."""
+    try:
+        out = subprocess.run(["vulkaninfo", "--summary"],
+                             capture_output=True, text=True,
+                             timeout=30).stdout
+    except Exception:
+        return False
+    devs = [l for l in out.splitlines() if "deviceName" in l]
+    return any("llvmpipe" not in d for d in devs) if devs else False
+
+
 def ensure_llama(gfx="gfx1101"):
     if not LLAMA.exists():
         sh(["git", "clone", "--depth", "1", "--branch", PIN,
@@ -52,7 +65,7 @@ def ensure_llama(gfx="gfx1101"):
         if shutil.which("hipcc"):
             backend = "HIP"
             args += ["-DGGML_HIP=ON", f"-DAMDGPU_TARGETS={gfx}"]
-        elif shutil.which("glslc") and Path("/dev/dxg").exists():
+        elif shutil.which("glslc") and _real_vulkan_device():
             backend = "Vulkan"
             args += ["-DGGML_VULKAN=ON"]
         else:
