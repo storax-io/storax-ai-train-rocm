@@ -50,18 +50,33 @@ def _post_json(url, body, headers=None, timeout=180):
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
 
 
+def _salvage_strings(text):
+    """Tolerant extraction: full-array parse first, else pull every
+    complete quoted string (a truncated tail loses ONE task, not the
+    batch — the first run died on exactly that)."""
+    m = re.search(r"\[.*\]", text, re.S)
+    if m:
+        try:
+            return [t for t in json.loads(m.group(0))
+                    if isinstance(t, str)]
+        except ValueError:
+            pass
+    return [x.replace('\\n', '\n').replace('\\"', '"')
+            for x in re.findall(r'"((?:[^"\\]|\\.){30,})"', text)]
+
+
 def gen_tasks(out_path: Path, log=print):
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not key:
         raise SystemExit("DEEPSEEK_API_KEY not set and no --tasks given")
-    tasks = []
-    for std, n in STD_PLAN:
-        got = 0
-        for batch in range((n + 29) // 30):
+
+    def one_batch(job):
+        std, batch = job
+        try:
             r = _post_json(
                 "https://api.deepseek.com/v1/chat/completions",
                 {"model": "deepseek-v4-pro", "temperature": 1.0,
-                 "max_tokens": 4000,
+                 "max_tokens": 6000,
                  "messages": [
                      {"role": "system",
                       "content": TASK_SYS.format(std=std)},
@@ -69,17 +84,28 @@ def gen_tasks(out_path: Path, log=print):
                       "content": f"Write 30 varied tasks (batch "
                                  f"{batch + 1}). JSON array only."}]},
                 headers={"Authorization": f"Bearer {key}"})
-            text = r["choices"][0]["message"]["content"]
-            m = re.search(r"\[.*\]", text, re.S)
-            if not m:
-                continue
-            for t in json.loads(m.group(0)):
-                if isinstance(t, str) and len(t) > 30 and got < n:
-                    tasks.append({"id": f"hs-{std.lower().replace('+', 'p')}"
-                                        f"-{hashlib.sha256(t.encode()).hexdigest()[:10]}",
-                                  "prompt": t.strip(), "std": std})
-                    got += 1
-        log(f"[tasks] {std}: {got}")
+            return std, _salvage_strings(
+                r["choices"][0]["message"]["content"])
+        except Exception as e:  # noqa: BLE001 — a batch must not kill the bank
+            log(f"[tasks] {std} batch {batch}: {e}")
+            return std, []
+
+    jobs = [(std, b) for std, n in STD_PLAN
+            for b in range((n + 29) // 30)]
+    per = {std: [] for std, _ in STD_PLAN}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for std, strs in ex.map(one_batch, jobs):
+            per[std] += strs
+    tasks = []
+    for std, n in STD_PLAN:
+        kept = 0
+        for t in per[std]:
+            if len(t) > 30 and kept < n:
+                tasks.append({"id": f"hs-{std.lower().replace('+', 'p')}"
+                                    f"-{hashlib.sha256(t.encode()).hexdigest()[:10]}",
+                              "prompt": t.strip(), "std": std})
+                kept += 1
+        log(f"[tasks] {std}: {kept}", flush=True)
     with out_path.open("w") as fh:
         for t in tasks:
             fh.write(json.dumps(t) + "\n")
@@ -98,6 +124,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--tasks", default=None)
     ap.add_argument("--samples", type=int, default=16)
+    ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--max-new", type=int, default=900)
     a = ap.parse_args()
     out = Path(a.out)
@@ -157,7 +184,7 @@ def main():
         return None
 
     n_win = 0
-    with out.open("a") as fh, ThreadPoolExecutor(max_workers=4) as ex:
+    with out.open("a") as fh, ThreadPoolExecutor(max_workers=a.workers) as ex:
         for i, w in enumerate(ex.map(harvest_one, tasks)):
             if w:
                 fh.write(json.dumps(w) + "\n")
