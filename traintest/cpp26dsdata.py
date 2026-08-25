@@ -148,7 +148,10 @@ IMPORTED_TEXT_N = int(os.environ.get("CPP26DS_IMPORTED_TEXT", "250"))
 _C_ORIGINS = ("lua", "zlib", "zstd", "brotli", "libuv", "musl", "curl",
               "apr", "mbedtls", "c-ares", "jansson", "cjson", "pcre2",
               "sqlite", "libjpeg", "mimalloc")
-C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "400"))
+C_IMPORT_TEXT_N = int(os.environ.get("CPP26DS_C_TEXT", "1200"))
+# 400 -> 1200 (Henri 2026-08-25: rel8 answers C++ to C requests — the
+# C band was starved at pack time while supply grew 5x; source caps
+# keep origins balanced at any band size)
 # SOURCE CAP (methodology-math §7b: "no project/org exceeds a fixed band
 # share — one codebase's style correlating with everything is the
 # corpus-level imprinting failure"). Harvest stays uncapped (musl is 69%
