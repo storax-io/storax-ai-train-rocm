@@ -230,8 +230,8 @@ _SYNTH_SHUF = _SYNTH[:]
 _rng.shuffle(_SYNTH_SHUF)
 
 
-def _fenced(code):
-    return f"```cpp\n{code.strip()}\n```"
+def _fenced(code, lang="cpp"):
+    return f"```{lang}\n{code.strip()}\n```"
 
 
 def article_texts():
@@ -360,7 +360,12 @@ def training_qa_pairs():
                  + [(r["prompt"], _fenced(r["code"]))
                     for r in _cpp_replay()]
                  + [(_wrap(r["prompt"], f"std:{i}", r.get("std", "C17")),
-                     _fenced(r["code"]))
+                     # eval-report 2026-08-25: the model fences its C
+                     # answers ```cpp — because WE did. C answers get a
+                     # c fence; the label is training signal.
+                     _fenced(r["code"],
+                             "c" if not r.get("std", "C17").startswith("C++")
+                             else "cpp"))
                     for i, r in enumerate(_std_replay())])
     # MIX enforcement, TWO-SIDED and supply-honest (Henri 2026-08-23:
     # "if the model degrades in normal c/c++ its not worth anything —

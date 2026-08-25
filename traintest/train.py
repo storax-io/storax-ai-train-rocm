@@ -151,6 +151,24 @@ def collate(batch):
     return input_ids, labels, attn
 
 
+def _preserve_tie_config(model_dir, model):
+    """save_pretrained rewrote tie_word_embeddings=true on an UNTIED
+    model (eval-report 2026-08-25: the Aug-25 save reverted it; the Q8
+    conversion gates caught it downstream). Force the config to state
+    the truth of the weights being saved."""
+    import json as _json
+    cfg_path = Path(model_dir) / "config.json"
+    if not cfg_path.exists():
+        return
+    cfg = _json.loads(cfg_path.read_text())
+    tied = getattr(getattr(model, "config", None), "tie_word_embeddings",
+                   None)
+    if tied is not None and cfg.get("tie_word_embeddings") != tied:
+        cfg["tie_word_embeddings"] = tied
+        cfg_path.write_text(_json.dumps(cfg, indent=2) + "\n")
+        print(f"config fixed: tie_word_embeddings={tied}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="HuggingFaceTB/SmolLM3-3B")
@@ -543,6 +561,7 @@ def main():
                 target = target.module if hasattr(target, "module") else target
                 target.save_pretrained(tmp / "model", safe_serialization=True)
                 tok.save_pretrained(tmp / "model")
+                _preserve_tie_config(tmp / "model", target)
                 torch.save({"optimizer": opt.state_dict(), "step": step,
                             "tokens_done": tokens_done}, tmp / "train_state.pt")
                 final = md / "latest"
@@ -605,6 +624,7 @@ def main():
         target = target.module if hasattr(target, "module") else target
         target.save_pretrained(out / "model", safe_serialization=True)
         tok.save_pretrained(out / "model")
+        _preserve_tie_config(out / "model", target)
         # multimodal checkpoints must carry the processor configs or
         # vLLM/AutoProcessor refuse to load them (LUMI job 21150500);
         # Mistral repos ship no preprocessor_config.json, so the staged
