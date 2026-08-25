@@ -3,12 +3,20 @@ quantize only — judging a quant is the eval battery's job, not this
 tool's).
 
     python3 tools/quantize.py --model <hf-ckpt-dir> --out <dir> \
-        [--quants q4_k_m,q5_k_m,q8_0]
+        [--quants q4_k_m,q5_k_m,q8_0] [--calib-pack <trainpack-dir>]
+        [--no-imatrix]
 
-llama.cpp is vendored under tools/llama.cpp on first run (pinned tag)
-and built with the HIP backend when hipcc is present, CPU otherwise —
-quantization is CPU-bound either way. Output: one GGUF per quant plus
-quantize-report.json (sizes, sha256s) beside them.
+Best-of-breed path: an IMPORTANCE MATRIX is computed first
+(llama-imatrix) and fed to every quantization — the difference between
+a competent low-bit quant and a lobotomized one. Calibration text is
+sampled from OUR OWN trainpack (--calib-pack): the deployment
+distribution, not wikitext. --no-imatrix falls back to plain quanting.
+
+llama.cpp is vendored under tools/llama.cpp on first run (pinned tag),
+HIP backend when hipcc is present, CPU otherwise (imatrix on CPU for a
+14B is slow — hours; fine overnight, fast once hipcc lands). Output:
+one GGUF per quant + imatrix.dat + quantize-report.json (sizes,
+sha256s, calibration provenance).
 """
 from __future__ import annotations
 
@@ -43,7 +51,7 @@ def ensure_llama():
             args += ["-DGGML_HIP=ON", "-DAMDGPU_TARGETS=gfx1101"]
         sh(args)
         sh(["cmake", "--build", str(LLAMA / "build"), "-j", "12",
-            "--target", "llama-quantize"])
+            "--target", "llama-quantize", "llama-imatrix"])
         print(f"llama.cpp built ({'HIP' if hip else 'CPU'} backend)")
     return bin_dir
 
@@ -56,11 +64,41 @@ def sha256(p: Path) -> str:
     return h.hexdigest()
 
 
+def build_calib(pack: Path, out_txt: Path, n_per_stream=40,
+                max_chars=4000):
+    """Calibration text from the trainpack itself: a few dozen records
+    per stream, truncated — the serve-time distribution in miniature."""
+    import random
+    rng = random.Random(0)
+    chunks = []
+    for f in sorted(pack.glob("*.jsonl")):
+        rows = []
+        for ln in f.open():
+            if ln.strip():
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                s = str(r.get("source") or r.get("edited") or "")
+                if len(s) > 200:
+                    rows.append(s)
+        for s in rng.sample(rows, min(n_per_stream, len(rows))):
+            chunks.append(s[:max_chars])
+    rng.shuffle(chunks)
+    out_txt.write_text("\n\n".join(chunks))
+    return len(chunks)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--quants", default="q4_k_m,q5_k_m,q8_0")
+    ap.add_argument("--calib-pack", default=None,
+                    help="trainpack dir to sample calibration text from")
+    ap.add_argument("--calib-file", default=None,
+                    help="ready-made calibration text file")
+    ap.add_argument("--no-imatrix", action="store_true")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -71,11 +109,29 @@ def main():
         sh([sys.executable, str(LLAMA / "convert_hf_to_gguf.py"),
             a.model, "--outfile", str(f16), "--outtype", "f16"])
     report = {"model": a.model, "quants": {}}
+    imatrix = None
+    if not a.no_imatrix:
+        calib = Path(a.calib_file) if a.calib_file else out / "calib.txt"
+        if a.calib_file is None:
+            if not a.calib_pack:
+                sys.exit("imatrix needs --calib-pack or --calib-file "
+                         "(or pass --no-imatrix)")
+            n = build_calib(Path(a.calib_pack), calib)
+            print(f"calibration: {n} chunks from {a.calib_pack}")
+        imatrix = out / "imatrix.dat"
+        if not imatrix.exists():
+            sh([str(bin_dir / "llama-imatrix"), "-m", str(f16),
+                "-f", str(calib), "-o", str(imatrix)])
+        report["imatrix"] = {"calib": str(calib),
+                             "sha256": sha256(imatrix)}
     for q in (s.strip() for s in a.quants.split(",")):
         gguf = out / f"{name}-{q}.gguf"
         if not gguf.exists():
-            sh([str(bin_dir / "llama-quantize"), str(f16), str(gguf),
-                q.upper()])
+            cmd = [str(bin_dir / "llama-quantize")]
+            if imatrix:
+                cmd += ["--imatrix", str(imatrix)]
+            cmd += [str(f16), str(gguf), q.upper()]
+            sh(cmd)
         report["quants"][q] = {"bytes": gguf.stat().st_size,
                                "sha256": sha256(gguf)}
         print(q, report["quants"][q]["bytes"] // (1 << 20), "MiB")
