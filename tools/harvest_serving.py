@@ -184,15 +184,24 @@ def main():
         return None
 
     n_win = 0
-    with out.open("a") as fh, ThreadPoolExecutor(max_workers=a.workers) as ex:
-        for i, w in enumerate(ex.map(harvest_one, tasks)):
+    losers = out.with_suffix(".losers.txt")
+    lost = set(losers.read_text().split()) if losers.exists() else set()
+    tasks = [t for t in tasks if t["id"] not in lost]
+    print(f"[plan] {len(tasks)} tasks, {a.workers} workers, "
+          f"{a.samples} samples max, winners -> {out}", flush=True)
+    with out.open("a") as fh, losers.open("a") as lf, \
+            ThreadPoolExecutor(max_workers=a.workers) as ex:
+        for i, (t, w) in enumerate(
+                zip(tasks, ex.map(harvest_one, tasks))):
             if w:
                 fh.write(json.dumps(w) + "\n")
                 fh.flush()
                 n_win += 1
-            if (i + 1) % 20 == 0:
-                print(f"[harvest] {i + 1}/{len(tasks)}, {n_win} winners",
-                      flush=True)
+            else:
+                lf.write(t["id"] + "\n")
+                lf.flush()
+            print(f"[harvest] {i + 1}/{len(tasks)} {t['std']:6s} "
+                  f"{'WIN' if w else '---'}  total {n_win}", flush=True)
     print(f"HARVEST-COMPLETE {n_win}/{len(tasks)} winners -> {out}",
           flush=True)
     return 0
