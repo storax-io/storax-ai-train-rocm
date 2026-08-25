@@ -127,8 +127,11 @@ by its maker.
 ```mermaid
 flowchart LR
     CK2["HF checkpoint dir"] --> CV["convert_hf_to_gguf -> f16 GGUF"]
+    CAL["calibration text sampled from<br/>OUR trainpack (--calib-pack) —<br/>the deployment distribution,<br/>not wikitext"] --> IM["llama-imatrix<br/>(default; --no-imatrix opts out)"]
+    CV --> IM
+    IM --> QQ
     LL["llama.cpp vendored at pinned tag,<br/>built once: HIP if hipcc exists,<br/>CPU otherwise (quantization is<br/>CPU-bound either way)"] --> CV
-    CV --> QQ["llama-quantize per requested<br/>quant (q4_k_m, q5_k_m, q8_0)"]
+    QQ["llama-quantize --imatrix per<br/>requested quant (q4_k_m, q5_k_m, q8_0)"]
     QQ --> Rep["quantize-report.json:<br/>sizes + sha256 per artifact"]
     QQ -.-> JUDGE2["judging: sc bench the quant<br/>through the same oracle —<br/>NOT this tool's job"]
 ```
