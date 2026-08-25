@@ -4,7 +4,8 @@ tool's).
 
     python3 tools/quantize.py --model <hf-ckpt-dir> --out <dir> \
         [--quants q4_k_m,q5_k_m,q8_0] [--calib-pack <trainpack-dir>]
-        [--no-imatrix]
+        [--no-imatrix] [--output-tensor-type q8_0]
+        [--token-embedding-type q8_0] [--gfx gfx1101]
 
 Best-of-breed path: an IMPORTANCE MATRIX is computed first
 (llama-imatrix) and fed to every quantization — the difference between
@@ -38,7 +39,7 @@ def sh(cmd, **kw):
     subprocess.run([str(c) for c in cmd], check=True, **kw)
 
 
-def ensure_llama():
+def ensure_llama(gfx="gfx1101"):
     if not LLAMA.exists():
         sh(["git", "clone", "--depth", "1", "--branch", PIN,
             "https://github.com/ggml-org/llama.cpp", str(LLAMA)])
@@ -48,7 +49,7 @@ def ensure_llama():
         args = ["cmake", "-S", str(LLAMA), "-B", str(LLAMA / "build"),
                 "-DCMAKE_BUILD_TYPE=Release"]
         if hip:
-            args += ["-DGGML_HIP=ON", "-DAMDGPU_TARGETS=gfx1101"]
+            args += ["-DGGML_HIP=ON", f"-DAMDGPU_TARGETS={gfx}"]
         sh(args)
         sh(["cmake", "--build", str(LLAMA / "build"), "-j", "12",
             "--target", "llama-quantize", "llama-imatrix"])
@@ -99,10 +100,16 @@ def main():
     ap.add_argument("--calib-file", default=None,
                     help="ready-made calibration text file")
     ap.add_argument("--no-imatrix", action="store_true")
+    ap.add_argument("--output-tensor-type", default=None,
+                    help="keep the output tensor at this type (e.g. q8_0/f16)")
+    ap.add_argument("--token-embedding-type", default=None,
+                    help="keep token embeddings at this type (e.g. q8_0/f16)")
+    ap.add_argument("--gfx", default="gfx1101",
+                    help="AMDGPU target for the HIP build")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    bin_dir = ensure_llama()
+    bin_dir = ensure_llama(a.gfx)
     name = Path(a.model).name
     f16 = out / f"{name}-f16.gguf"
     if not f16.exists():
@@ -130,6 +137,10 @@ def main():
             cmd = [str(bin_dir / "llama-quantize")]
             if imatrix:
                 cmd += ["--imatrix", str(imatrix)]
+            if a.output_tensor_type:
+                cmd += ["--output-tensor-type", a.output_tensor_type]
+            if a.token_embedding_type:
+                cmd += ["--token-embedding-type", a.token_embedding_type]
             cmd += [str(f16), str(gguf), q.upper()]
             sh(cmd)
         report["quants"][q] = {"bytes": gguf.stat().st_size,
