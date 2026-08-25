@@ -45,15 +45,22 @@ def ensure_llama(gfx="gfx1101"):
             "https://github.com/ggml-org/llama.cpp", str(LLAMA)])
     bin_dir = LLAMA / "build/bin"
     if not (bin_dir / "llama-quantize").exists():
-        hip = shutil.which("hipcc") is not None
+        # backend ladder: HIP (hipcc) > Vulkan (in-distro, works on WSL
+        # via Mesa d3d12 — Ubuntu 26.04 predates AMD's apt packaging) > CPU
         args = ["cmake", "-S", str(LLAMA), "-B", str(LLAMA / "build"),
                 "-DCMAKE_BUILD_TYPE=Release"]
-        if hip:
+        if shutil.which("hipcc"):
+            backend = "HIP"
             args += ["-DGGML_HIP=ON", f"-DAMDGPU_TARGETS={gfx}"]
+        elif shutil.which("glslc") and Path("/dev/dxg").exists():
+            backend = "Vulkan"
+            args += ["-DGGML_VULKAN=ON"]
+        else:
+            backend = "CPU"
         sh(args)
         sh(["cmake", "--build", str(LLAMA / "build"), "-j", "12",
             "--target", "llama-quantize", "llama-imatrix"])
-        print(f"llama.cpp built ({'HIP' if hip else 'CPU'} backend)")
+        print(f"llama.cpp built ({backend} backend)")
     return bin_dir
 
 
