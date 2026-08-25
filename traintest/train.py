@@ -232,6 +232,14 @@ def main():
     ap.add_argument("--system", default=None,
                     help="short system-prompt override for all chat samples "
                          "(use the same value in evaluate.py)")
+    ap.add_argument("--mtp", action="store_true",
+                    help="train an auxiliary multi-token-prediction head "
+                         "(predicts t+2); weights saved to out/mtp/, "
+                         "model/ stays stock")
+    ap.add_argument("--mtp-weight", type=float, default=0.3)
+    ap.add_argument("--mtp-stride", type=int, default=4,
+                    help="compute the MTP loss every Nth position "
+                         "(bounds the extra logits memory)")
     ap.add_argument("--freeze", default="",
                     help="comma-separated param-name substrings to freeze, "
                          "e.g. vision_tower,multi_modal_projector,embed_tokens,lm_head")
@@ -335,6 +343,28 @@ def main():
     if args.compile:
         model = torch.compile(model)
 
+    mtp_head = None
+    mtp_h = []
+    if args.mtp:
+        # DeepSeek-V3-style MTP, minimal form: RMSNorm + linear projection
+        # of the FINAL hidden state, decoded through the model's own
+        # (untied) lm_head to predict token t+2. Densifies learning
+        # signal per token (we are data-bound) and enables
+        # self-speculative decoding at serve time. Weights live in a
+        # SEPARATE out/mtp/ dir — model/ stays a stock checkpoint.
+        _base = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _base = _base.module if hasattr(_base, "module") else _base
+        _d = _base.config.hidden_size
+        mtp_head = torch.nn.Sequential(
+            torch.nn.RMSNorm(_d), torch.nn.Linear(_d, _d, bias=False))
+        torch.nn.init.normal_(mtp_head[1].weight, std=0.006)
+        mtp_head.to(device=device, dtype=torch.bfloat16)
+        _base.model.norm.register_forward_hook(
+            lambda m, i, o: mtp_h.append(o))
+        if is_main:
+            print(f"MTP head armed: d={_d}, stride {args.mtp_stride}, "
+                  f"weight {args.mtp_weight}", flush=True)
+
     # transformers Adafactor with scale_parameter=False applies --lr as an
     # absolute step size. torch.optim.Adafactor multiplies lr by parameter
     # RMS (~0.02), which silently turned 1e-5 into ~2e-7 and produced a run
@@ -400,6 +430,10 @@ def main():
         st = torch.load(args.resume_state, map_location="cpu",
                         weights_only=False)
         opt.load_state_dict(st["optimizer"])
+        if mtp_head is not None and "mtp" in st:
+            mtp_head.load_state_dict(st["mtp"])
+            if is_main:
+                print("MTP head resumed from state", flush=True)
         start_step = int(st["step"])
         tokens_done = int(st.get("tokens_done", 0))
         for _ in range(start_step):
@@ -460,8 +494,22 @@ def main():
                    else contextlib.nullcontext())
             try:
                 with ctx:
+                    mtp_h.clear()
                     loss = model(input_ids=input_ids, attention_mask=attn,
                                  labels=labels).loss
+                    if mtp_head is not None and mtp_h:
+                        _base = (model._orig_mod
+                                 if hasattr(model, "_orig_mod") else model)
+                        _base = (_base.module
+                                 if hasattr(_base, "module") else _base)
+                        h = mtp_h.pop()[:, :-2:args.mtp_stride]
+                        tgt = labels[:, 2::args.mtp_stride][:, :h.shape[1]]
+                        lg = _base.lm_head(mtp_head(h))
+                        l2 = torch.nn.functional.cross_entropy(
+                            lg.flatten(0, 1).float(), tgt.flatten(),
+                            ignore_index=-100)
+                        if torch.isfinite(l2):
+                            loss = loss + args.mtp_weight * l2
                     (loss / args.accum).backward()
             except torch.OutOfMemoryError:
                 # the allocator table names where the bytes sit — worth more
@@ -563,7 +611,12 @@ def main():
                 tok.save_pretrained(tmp / "model")
                 _preserve_tie_config(tmp / "model", target)
                 torch.save({"optimizer": opt.state_dict(), "step": step,
-                            "tokens_done": tokens_done}, tmp / "train_state.pt")
+                    **({"mtp": mtp_head.state_dict()}
+                       if mtp_head is not None else {}),
+                            "tokens_done": tokens_done,
+                            **({"mtp": mtp_head.state_dict()}
+                               if mtp_head is not None else {})},
+                           tmp / "train_state.pt")
                 final = md / "latest"
                 _sh.rmtree(final, ignore_errors=True)
                 tmp.rename(final)
@@ -617,6 +670,8 @@ def main():
     if args.save_state and is_main:
         state_dst = out / "train_state.pt"
         torch.save({"optimizer": opt.state_dict(), "step": step,
+                    **({"mtp": mtp_head.state_dict()}
+                       if mtp_head is not None else {}),
                     "tokens_done": tokens_done}, state_dst)
         print(f"train state -> {state_dst}", flush=True)
     if args.save_model and is_main:
@@ -625,6 +680,14 @@ def main():
         target.save_pretrained(out / "model", safe_serialization=True)
         tok.save_pretrained(out / "model")
         _preserve_tie_config(out / "model", target)
+        if mtp_head is not None and is_main:
+            (out / "mtp").mkdir(exist_ok=True)
+            torch.save(mtp_head.state_dict(), out / "mtp" / "mtp_head.pt")
+            (out / "mtp" / "mtp.json").write_text(json.dumps(
+                {"hidden_size": mtp_head[1].weight.shape[0],
+                 "predicts": "t+2", "stride": args.mtp_stride,
+                 "weight": args.mtp_weight}, indent=1))
+            print("MTP head saved -> mtp/ (model/ is stock)", flush=True)
         # multimodal checkpoints must carry the processor configs or
         # vLLM/AutoProcessor refuse to load them (LUMI job 21150500);
         # Mistral repos ship no preprocessor_config.json, so the staged
