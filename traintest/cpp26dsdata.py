@@ -359,6 +359,12 @@ def training_qa_pairs():
                    _fenced(r["source"])) for r in _BASELINE]
                  + [(r["prompt"], _fenced(r["code"]))
                     for r in _cpp_replay()]
+                 + [(_wrap(r["prompt"], r.get("id", f"hw:{i}"), r["std"]),
+                     _fenced(r["source"],
+                             "c" if not r["std"].startswith("C++")
+                             else "cpp"))
+                    for i, r in enumerate(_WINNERS)
+                    if r.get("std") and r["std"] != "C++26"]
                  + [(_wrap(r["prompt"], f"std:{i}", r.get("std", "C17")),
                      # eval-report 2026-08-25: the model fences its C
                      # answers ```cpp — because WE did. C answers get a
@@ -408,6 +414,9 @@ def training_qa_pairs():
         new_qa.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
                        _fenced(r["source"])))
     for r in _WINNERS:
+        wstd = r.get("std")
+        if wstd and wstd != "C++26":
+            continue    # standard-sweep winners joined base_pool above
         new_qa.append((_wrap(r["prompt"], r.get("id", r["prompt"])),
                        _fenced(r["source"])))
     for r in _CT:
