@@ -115,8 +115,12 @@ flowchart TB
 
 Converges reality toward the plan: observes what exists (run tree,
 queue) versus what should, and submits **exactly what is missing —
-never what already exists**. The single recovery verb after any
-interruption or confusion. Reconcile itself is free (login-side,
+never what already exists**. The recovery verb for PLAN-FILE campaigns
+— it reads the campaign state, so it will faithfully chase whatever
+plan that state names. A consolidate launched directly (no plan file)
+recovers by re-running its own command, which is equally idempotent;
+retire stale campaign state first or reconcile will resurrect the old
+plan. Reconcile itself is free (login-side,
 read-only); any GPU cost you see afterwards is the *unfinished
 remainder of the original plan* resuming, not work being redone.
 
