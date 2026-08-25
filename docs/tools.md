@@ -130,6 +130,7 @@ flowchart LR
 | `tools/gpu_acceptance.py` | GPU acceptance: VRAM pattern-fill integrity + sustained bf16 burst |
 | `tools/node_probe.py` | per-node health: alloc+GEMM+sync every GCD + filesystem touch — a wedged GPU fails in seconds, not mid-round |
 | `tools/estimate.py` | project measured MFU to other GPUs/model sizes |
+| `tools/quantize.py` | checkpoint -> GGUF quants for serving (llama.cpp vendored+pinned, HIP when hipcc exists, else CPU); sizes+sha256 report; judging a quant stays with the eval battery |
 
 ### Phase-0 lineage (kept for the de-risking story)
 
