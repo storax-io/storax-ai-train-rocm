@@ -116,6 +116,23 @@ flowchart LR
     LOOP["tools/cpp26_loop.py — local dynamic<br/>rounds: train -> probe -> add verified<br/>remedials for the error CLASS -> retrain"] ~~~ EJ
 ```
 
+### `tools/quantize.py` — checkpoint to serving artifacts
+
+Quantize-only by design: a quant is judged by the eval battery, never
+by its maker.
+
+**Cost:** CPU-minutes (convert + requantize; ~10–20 min for a 14B).
+**Touches:** the --out dir + vendored tools/llama.cpp (pinned tag).
+
+```mermaid
+flowchart LR
+    CK2["HF checkpoint dir"] --> CV["convert_hf_to_gguf -> f16 GGUF"]
+    LL["llama.cpp vendored at pinned tag,<br/>built once: HIP if hipcc exists,<br/>CPU otherwise (quantization is<br/>CPU-bound either way)"] --> CV
+    CV --> QQ["llama-quantize per requested<br/>quant (q4_k_m, q5_k_m, q8_0)"]
+    QQ --> Rep["quantize-report.json:<br/>sizes + sha256 per artifact"]
+    QQ -.-> JUDGE2["judging: sc bench the quant<br/>through the same oracle —<br/>NOT this tool's job"]
+```
+
 ### Probes and environment (run before anything expensive)
 
 | tool | one line |
